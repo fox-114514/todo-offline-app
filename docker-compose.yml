@@ -1,0 +1,17 @@
+services:
+  todo-backend:
+    build:
+      context: ./backend
+    container_name: todo-backend
+    restart: unless-stopped
+    ports:
+      - "${TODO_BACKEND_PUBLIC_PORT:-8000}:8000"
+    environment:
+      TODO_BACKEND_HOST: "0.0.0.0"
+      TODO_BACKEND_PORT: "8000"
+      TODO_BACKEND_DB: "/data/todo.sqlite3"
+    volumes:
+      - todo_backend_data:/data
+
+volumes:
+  todo_backend_data:

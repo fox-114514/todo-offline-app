@@ -1,0 +1,15 @@
+backend/data/
+backend/*.sqlite3
+backend/*.db
+backend/__pycache__/
+backend/todo_backend/__pycache__/
+backend/tests/__pycache__/
+*.pyc
+
+android/.gradle/
+android/app/build/
+android/build/
+android/local.properties
+
+.env
+.DS_Store
