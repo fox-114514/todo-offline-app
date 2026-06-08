@@ -180,7 +180,6 @@ class TodoDatabase:
 
                 CREATE INDEX IF NOT EXISTS idx_tasks_user_sync ON tasks(user_id, sync_seq);
                 CREATE INDEX IF NOT EXISTS idx_tasks_user_visible ON tasks(user_id, deleted_at);
-                CREATE INDEX IF NOT EXISTS idx_tasks_visibility ON tasks(visibility, updated_at);
 
                 CREATE TABLE IF NOT EXISTS circle_members (
                     circle_id TEXT NOT NULL,
@@ -257,6 +256,7 @@ class TodoDatabase:
             )
 
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_circle_id ON users(circle_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_visibility ON tasks(visibility, updated_at)")
 
     def _table_columns(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
         return {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}

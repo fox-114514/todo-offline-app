@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -11,6 +12,7 @@ import uuid
 from pathlib import Path
 
 from todo_backend.server import create_server
+from todo_backend.database import TodoDatabase
 
 
 class ApiClient:
@@ -239,6 +241,87 @@ class TodoApiTest(unittest.TestCase):
 
         unliked = bob_client.request("DELETE", f"/api/ideas/{idea_id}/like")
         self.assertEqual(unliked["data"]["likeCount"], 0)
+
+    def test_migrates_v1_database_before_visibility_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "old.sqlite3"
+            with sqlite3.connect(db_path) as conn:
+                conn.executescript(
+                    """
+                    CREATE TABLE users (
+                        id TEXT PRIMARY KEY,
+                        username TEXT NOT NULL UNIQUE,
+                        email TEXT NOT NULL UNIQUE,
+                        password_salt TEXT NOT NULL,
+                        password_hash TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+
+                    CREATE TABLE tasks (
+                        id TEXT PRIMARY KEY,
+                        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        title TEXT NOT NULL,
+                        content TEXT NOT NULL DEFAULT '',
+                        status TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        priority TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL,
+                        deleted_at TEXT,
+                        sync_seq INTEGER NOT NULL
+                    );
+
+                    CREATE TABLE reminder_settings (
+                        user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                        enabled INTEGER NOT NULL,
+                        frequency_seconds INTEGER NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        sync_seq INTEGER NOT NULL
+                    );
+
+                    CREATE TABLE processed_operations (
+                        operation_id TEXT PRIMARY KEY,
+                        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        task_id TEXT,
+                        operation_type TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    );
+
+                    CREATE TABLE sync_meta (
+                        key TEXT PRIMARY KEY,
+                        value INTEGER NOT NULL
+                    );
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO users(id, username, email, password_salt, password_hash, created_at, updated_at)
+                    VALUES('u1', 'olduser', 'old@example.com', 'salt', 'hash', '2026-06-08T12:00:00Z', '2026-06-08T12:00:00Z')
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO tasks(id, user_id, title, content, status, category, priority, created_at, updated_at, version, deleted_at, sync_seq)
+                    VALUES('t1', 'u1', '旧 idea', '', '想做', '其他', '中', '2026-06-08T12:00:00Z', '2026-06-08T12:00:00Z', 1, NULL, 1)
+                    """
+                )
+
+            TodoDatabase(db_path)
+
+            with sqlite3.connect(db_path) as conn:
+                user_columns = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+                task_columns = {row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+                indexes = {row[1] for row in conn.execute("PRAGMA index_list(tasks)").fetchall()}
+                circle_id = conn.execute("SELECT circle_id FROM users WHERE id = 'u1'").fetchone()[0]
+                visibility = conn.execute("SELECT visibility FROM tasks WHERE id = 't1'").fetchone()[0]
+
+            self.assertIn("circle_id", user_columns)
+            self.assertIn("visibility", task_columns)
+            self.assertIn("idx_tasks_visibility", indexes)
+            self.assertTrue(circle_id.startswith("ID-"))
+            self.assertEqual(visibility, "private")
 
 
 if __name__ == "__main__":
