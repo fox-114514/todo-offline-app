@@ -63,14 +63,19 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.todooffline.data.CATEGORY_OTHER
+import com.example.todooffline.data.FeedIdea
+import com.example.todooffline.data.IdeaComment
 import com.example.todooffline.data.PRIORITY_MEDIUM
 import com.example.todooffline.data.STATUS_TODO
 import com.example.todooffline.data.SyncState
 import com.example.todooffline.data.TodoTask
+import com.example.todooffline.data.VISIBILITY_CIRCLE
+import com.example.todooffline.data.VISIBILITY_PRIVATE
 import com.example.todooffline.data.taskCategories
 import com.example.todooffline.data.taskPriorities
 import com.example.todooffline.data.taskStatuses
 import com.example.todooffline.reminder.ensureChannel
+import com.example.todooffline.ui.MainTab
 import com.example.todooffline.ui.TodoUiState
 import com.example.todooffline.ui.TodoViewModel
 import com.example.todooffline.ui.TodoViewModelFactory
@@ -104,7 +109,7 @@ private fun TodoApp(viewModel: TodoViewModel) {
     if (!state.authenticated) {
         AuthScreen(state, viewModel)
     } else {
-        TaskScreen(state, viewModel)
+        MainScreen(state, viewModel)
     }
 }
 
@@ -122,8 +127,8 @@ private fun AuthScreen(state: TodoUiState, viewModel: TodoViewModel) {
             .padding(24.dp),
         verticalArrangement = Arrangement.Center,
     ) {
-        Text("离线 ToDo", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-        Text("服务端不在线时，也可以继续使用本地任务。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("Idea Board", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        Text("私藏想法，也可以发到自己的好友圈。", color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(24.dp))
         OutlinedTextField(username, { username = it }, label = { Text("用户名或邮箱") }, modifier = Modifier.fillMaxWidth())
         if (registerMode) {
@@ -163,7 +168,7 @@ private fun AuthScreen(state: TodoUiState, viewModel: TodoViewModel) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun TaskScreen(state: TodoUiState, viewModel: TodoViewModel) {
+private fun MainScreen(state: TodoUiState, viewModel: TodoViewModel) {
     var editorTask by remember { mutableStateOf<TodoTask?>(null) }
     var creating by remember { mutableStateOf(false) }
     var settingsOpen by remember { mutableStateOf(false) }
@@ -173,7 +178,7 @@ private fun TaskScreen(state: TodoUiState, viewModel: TodoViewModel) {
             TopAppBar(
                 title = {
                     Column {
-                        Text("离线 ToDo")
+                        Text(if (state.tab == MainTab.IDEAS) "我的 Idea" else "好友圈")
                         Text(state.syncMessage, style = MaterialTheme.typography.labelSmall)
                     }
                 },
@@ -189,11 +194,13 @@ private fun TaskScreen(state: TodoUiState, viewModel: TodoViewModel) {
             )
         },
         floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = { creating = true },
-                icon = { Icon(Icons.Default.Add, contentDescription = null) },
-                text = { Text("新建") },
-            )
+            if (state.tab == MainTab.IDEAS) {
+                ExtendedFloatingActionButton(
+                    onClick = { creating = true },
+                    icon = { Icon(Icons.Default.Add, contentDescription = null) },
+                    text = { Text("新建 Idea") },
+                )
+            }
         },
     ) { padding ->
         Column(
@@ -202,44 +209,65 @@ private fun TaskScreen(state: TodoUiState, viewModel: TodoViewModel) {
                 .fillMaxSize(),
         ) {
             if (state.offline) OfflineBanner()
-            SearchAndFilters(state, viewModel)
-            if (state.tasks.isEmpty()) {
-                EmptyState()
+            MainTabs(state, viewModel)
+            if (state.tab == MainTab.IDEAS) {
+                IdeaListPanel(state, viewModel, onEdit = { editorTask = it })
             } else {
-                LazyColumn(
-                    contentPadding = PaddingValues(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    items(state.tasks, key = { it.id }) { task ->
-                        TaskCard(task, onEdit = { editorTask = task }, onDelete = { viewModel.deleteTask(task) })
-                    }
-                }
+                FeedPanel(state, viewModel)
             }
         }
     }
 
     if (creating) {
-        TaskEditorDialog(
+        IdeaEditorDialog(
             task = null,
             onDismiss = { creating = false },
-            onSave = { title, content, status, category, priority ->
-                viewModel.createTask(title, content, status, category, priority)
+            onSave = { title, content, status, category, priority, visibility ->
+                viewModel.createTask(title, content, status, category, priority, visibility)
                 creating = false
             },
         )
     }
     editorTask?.let { task ->
-        TaskEditorDialog(
+        IdeaEditorDialog(
             task = task,
             onDismiss = { editorTask = null },
-            onSave = { title, content, status, category, priority ->
-                viewModel.updateTask(task, title, content, status, category, priority)
+            onSave = { title, content, status, category, priority, visibility ->
+                viewModel.updateTask(task, title, content, status, category, priority, visibility)
                 editorTask = null
             },
         )
     }
+    state.selectedCommentIdea?.let { idea ->
+        CommentsDialog(
+            idea = idea,
+            comments = state.comments,
+            onDismiss = viewModel::closeComments,
+            onSend = viewModel::createComment,
+        )
+    }
     if (settingsOpen) {
         SettingsDialog(state, viewModel, onDismiss = { settingsOpen = false })
+    }
+}
+
+@Composable
+private fun MainTabs(state: TodoUiState, viewModel: TodoViewModel) {
+    Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Button(
+            onClick = { viewModel.setTab(MainTab.IDEAS) },
+            enabled = state.tab != MainTab.IDEAS,
+            modifier = Modifier.weight(1f),
+        ) {
+            Text("我的 Idea")
+        }
+        Button(
+            onClick = { viewModel.setTab(MainTab.FEED) },
+            enabled = state.tab != MainTab.FEED,
+            modifier = Modifier.weight(1f),
+        ) {
+            Text("好友圈")
+        }
     }
 }
 
@@ -262,10 +290,27 @@ private fun SyncIcon(state: TodoUiState) {
 private fun OfflineBanner() {
     Surface(color = Color(0xFFFFF7ED), modifier = Modifier.fillMaxWidth()) {
         Text(
-            "离线模式：读写都已保存到本地，网络恢复后自动同步。",
+            "离线模式：个人 idea 已保存到本地，网络恢复后自动同步。",
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
             color = Color(0xFF9A3412),
         )
+    }
+}
+
+@Composable
+private fun IdeaListPanel(state: TodoUiState, viewModel: TodoViewModel, onEdit: (TodoTask) -> Unit) {
+    SearchAndFilters(state, viewModel)
+    if (state.tasks.isEmpty()) {
+        EmptyState("还没有 idea")
+    } else {
+        LazyColumn(
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            items(state.tasks, key = { it.id }) { task ->
+                IdeaCard(task, onEdit = { onEdit(task) }, onDelete = { viewModel.deleteTask(task) })
+            }
+        }
     }
 }
 
@@ -299,14 +344,14 @@ private fun SearchAndFilters(state: TodoUiState, viewModel: TodoViewModel) {
 }
 
 @Composable
-private fun EmptyState() {
+private fun EmptyState(text: String) {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Text("还没有任务", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(text, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
 @Composable
-private fun TaskCard(task: TodoTask, onEdit: () -> Unit, onDelete: () -> Unit) {
+private fun IdeaCard(task: TodoTask, onEdit: () -> Unit, onDelete: () -> Unit) {
     val priorityColor = when (task.priority) {
         "高" -> Color(0xFFDC2626)
         "低" -> Color(0xFF64748B)
@@ -334,11 +379,115 @@ private fun TaskCard(task: TodoTask, onEdit: () -> Unit, onDelete: () -> Unit) {
                 LabelChip(task.status)
                 LabelChip(task.category)
                 LabelChip(task.priority, priorityColor)
+                LabelChip(if (task.visibility == VISIBILITY_CIRCLE) "好友圈公开" else "私密", if (task.visibility == VISIBILITY_CIRCLE) Color(0xFF16A34A) else Color(0xFF64748B))
                 if (task.syncState == SyncState.PENDING) LabelChip("待同步", Color(0xFFCA8A04))
                 if (task.syncState == SyncState.CONFLICT) LabelChip("冲突", MaterialTheme.colorScheme.error)
             }
             Spacer(Modifier.height(6.dp))
             Text("更新于 ${task.updatedAt}", style = MaterialTheme.typography.labelSmall)
+        }
+    }
+}
+
+@Composable
+private fun FeedPanel(state: TodoUiState, viewModel: TodoViewModel) {
+    var joinId by remember { mutableStateOf("") }
+    Column(Modifier.fillMaxSize()) {
+        Card(Modifier.padding(horizontal = 16.dp, vertical = 8.dp).fillMaxWidth()) {
+            Column(Modifier.padding(12.dp)) {
+                Text("我的好友圈 ID", style = MaterialTheme.typography.labelMedium)
+                Text(state.circleId.ifBlank { "加载中" }, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(10.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = joinId,
+                        onValueChange = { joinId = it.uppercase() },
+                        label = { Text("输入别人的好友圈 ID") },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Button(onClick = { viewModel.joinCircle(joinId); joinId = "" }) {
+                        Text("加入")
+                    }
+                }
+                state.socialError?.let {
+                    Spacer(Modifier.height(6.dp))
+                    Text(it, color = MaterialTheme.colorScheme.error)
+                }
+            }
+        }
+        FeedFilters(state, viewModel)
+        if (state.feed.isEmpty()) {
+            EmptyState("加入好友圈后，就能刷到他们公开的 idea")
+        } else {
+            LazyColumn(
+                contentPadding = PaddingValues(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                items(state.feed, key = { it.task.id }) { item ->
+                    FeedCard(
+                        idea = item,
+                        onLike = { viewModel.toggleLike(item) },
+                        onComments = { viewModel.openComments(item) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
+@Composable
+private fun FeedFilters(state: TodoUiState, viewModel: TodoViewModel) {
+    FlowRow(
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        FilterChip(
+            selected = state.selectedFeedCircleId == null,
+            onClick = { viewModel.selectFeedCircle(null) },
+            label = { Text("全部好友圈") },
+        )
+        state.joinedCircles.forEach { circle ->
+            FilterChip(
+                selected = state.selectedFeedCircleId == circle.circleId,
+                onClick = { viewModel.selectFeedCircle(circle.circleId) },
+                label = { Text(circle.owner.username) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun FeedCard(idea: FeedIdea, onLike: () -> Unit, onComments: () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        Column(Modifier.padding(14.dp)) {
+            Text("${idea.author.username} 的 idea", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+            Text(idea.task.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            if (idea.task.content.isNotBlank()) {
+                Spacer(Modifier.height(6.dp))
+                Text(idea.task.content, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                LabelChip(idea.task.category)
+                LabelChip(idea.task.status)
+                LabelChip(idea.task.priority)
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = onLike) {
+                    Text(if (idea.likedByMe) "已赞 ${idea.likeCount}" else "点赞 ${idea.likeCount}")
+                }
+                OutlinedButton(onClick = onComments) {
+                    Text("评论 ${idea.commentCount}")
+                }
+            }
         }
     }
 }
@@ -352,37 +501,39 @@ private fun LabelChip(text: String, color: Color = MaterialTheme.colorScheme.pri
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun TaskEditorDialog(
+private fun IdeaEditorDialog(
     task: TodoTask?,
     onDismiss: () -> Unit,
-    onSave: (String, String, String, String, String) -> Unit,
+    onSave: (String, String, String, String, String, String) -> Unit,
 ) {
     var title by remember(task?.id) { mutableStateOf(task?.title ?: "") }
     var content by remember(task?.id) { mutableStateOf(task?.content ?: "") }
     var status by remember(task?.id) { mutableStateOf(task?.status ?: STATUS_TODO) }
     var category by remember(task?.id) { mutableStateOf(task?.category ?: CATEGORY_OTHER) }
     var priority by remember(task?.id) { mutableStateOf(task?.priority ?: PRIORITY_MEDIUM) }
+    var visibility by remember(task?.id) { mutableStateOf(task?.visibility ?: VISIBILITY_PRIVATE) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = {
-            Button(onClick = { onSave(title, content, status, category, priority) }) {
+            Button(onClick = { onSave(title, content, status, category, priority, visibility) }) {
                 Text("保存")
             }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("取消") }
         },
-        title = { Text(if (task == null) "新建任务" else "编辑任务") },
+        title = { Text(if (task == null) "新建 Idea" else "编辑 Idea") },
         text = {
             Column {
                 OutlinedTextField(title, { title = it.take(200) }, label = { Text("标题") }, modifier = Modifier.fillMaxWidth())
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(content, { content = it.take(5000) }, label = { Text("内容") }, modifier = Modifier.fillMaxWidth(), minLines = 3)
                 Spacer(Modifier.height(10.dp))
-                OptionRow("状态", taskStatuses, status) { status = it }
-                OptionRow("分类", taskCategories, category) { category = it }
-                OptionRow("优先级", taskPriorities, priority) { priority = it }
+                OptionRow("可见性", listOf("私密" to VISIBILITY_PRIVATE, "好友圈公开" to VISIBILITY_CIRCLE), visibility) { visibility = it }
+                OptionRow("状态", taskStatuses.map { it to it }, status) { status = it }
+                OptionRow("分类", taskCategories.map { it to it }, category) { category = it }
+                OptionRow("优先级", taskPriorities.map { it to it }, priority) { priority = it }
             }
         },
     )
@@ -390,14 +541,55 @@ private fun TaskEditorDialog(
 
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
-private fun OptionRow(title: String, values: List<String>, selected: String, onSelect: (String) -> Unit) {
+private fun OptionRow(title: String, values: List<Pair<String, String>>, selected: String, onSelect: (String) -> Unit) {
     Text(title, style = MaterialTheme.typography.labelMedium)
     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        values.forEach { value ->
-            FilterChip(selected = selected == value, onClick = { onSelect(value) }, label = { Text(value) })
+        values.forEach { (label, value) ->
+            FilterChip(selected = selected == value, onClick = { onSelect(value) }, label = { Text(label) })
         }
     }
     Spacer(Modifier.height(6.dp))
+}
+
+@Composable
+private fun CommentsDialog(
+    idea: FeedIdea,
+    comments: List<IdeaComment>,
+    onDismiss: () -> Unit,
+    onSend: (String) -> Unit,
+) {
+    var content by remember(idea.task.id) { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            Button(onClick = { onSend(content); content = "" }) {
+                Text("发送")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
+        },
+        title = { Text("评论：${idea.task.title}") },
+        text = {
+            Column {
+                if (comments.isEmpty()) {
+                    Text("还没有评论", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    comments.takeLast(8).forEach { comment ->
+                        Text("${comment.author.username}：${comment.content}", modifier = Modifier.padding(vertical = 4.dp))
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = content,
+                    onValueChange = { content = it.take(1000) },
+                    label = { Text("提供一点思路") },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2,
+                )
+            }
+        },
+    )
 }
 
 @Composable
@@ -430,6 +622,7 @@ private fun SettingsDialog(state: TodoUiState, viewModel: TodoViewModel, onDismi
         text = {
             Column {
                 Text("账号：${state.username}")
+                Text("我的好友圈 ID：${state.circleId.ifBlank { "加载中" }}")
                 Text("同步：${state.syncMessage}")
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(baseUrl, { baseUrl = it }, label = { Text("后端地址") }, modifier = Modifier.fillMaxWidth())

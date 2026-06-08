@@ -16,6 +16,7 @@ from typing import Any
 TASK_STATUSES = {"想做", "进行中", "完成", "放弃"}
 TASK_CATEGORIES = {"游戏", "程序", "技能", "其他"}
 TASK_PRIORITIES = {"高", "中", "低"}
+TASK_VISIBILITIES = {"private", "circle"}
 OPERATION_TYPES = {"create", "update", "delete"}
 
 
@@ -70,6 +71,7 @@ def row_to_task(row: sqlite3.Row) -> dict[str, Any]:
         "status": row["status"],
         "category": row["category"],
         "priority": row["priority"],
+        "visibility": row["visibility"],
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
         "version": row["version"],
@@ -82,8 +84,17 @@ def row_to_user(row: sqlite3.Row) -> dict[str, Any]:
         "id": row["id"],
         "username": row["username"],
         "email": row["email"],
+        "circleId": row["circle_id"],
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
+    }
+
+
+def row_to_public_user(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "username": row["username"],
+        "circleId": row["circle_id"],
     }
 
 
@@ -93,6 +104,26 @@ def row_to_reminder(row: sqlite3.Row) -> dict[str, Any]:
         "frequencySeconds": row["frequency_seconds"],
         "updatedAt": row["updated_at"],
     }
+
+
+def row_to_comment(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "ideaId": row["idea_id"],
+        "author": {
+            "id": row["author_id"],
+            "username": row["author_username"],
+            "circleId": row["author_circle_id"],
+        },
+        "content": row["content"],
+        "createdAt": row["created_at"],
+        "deletedAt": row["deleted_at"],
+    }
+
+
+def generate_circle_id() -> str:
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    return "ID-" + "".join(secrets.choice(alphabet) for _ in range(8))
 
 
 class TodoDatabase:
@@ -116,6 +147,7 @@ class TodoDatabase:
                     id TEXT PRIMARY KEY,
                     username TEXT NOT NULL UNIQUE,
                     email TEXT NOT NULL UNIQUE,
+                    circle_id TEXT,
                     password_salt TEXT NOT NULL,
                     password_hash TEXT NOT NULL,
                     created_at TEXT NOT NULL,
@@ -138,6 +170,7 @@ class TodoDatabase:
                     status TEXT NOT NULL,
                     category TEXT NOT NULL,
                     priority TEXT NOT NULL,
+                    visibility TEXT NOT NULL DEFAULT 'private',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     version INTEGER NOT NULL,
@@ -147,6 +180,36 @@ class TodoDatabase:
 
                 CREATE INDEX IF NOT EXISTS idx_tasks_user_sync ON tasks(user_id, sync_seq);
                 CREATE INDEX IF NOT EXISTS idx_tasks_user_visible ON tasks(user_id, deleted_at);
+                CREATE INDEX IF NOT EXISTS idx_tasks_visibility ON tasks(visibility, updated_at);
+
+                CREATE TABLE IF NOT EXISTS circle_members (
+                    circle_id TEXT NOT NULL,
+                    member_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    joined_at TEXT NOT NULL,
+                    PRIMARY KEY(circle_id, member_user_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_circle_members_user ON circle_members(member_user_id);
+
+                CREATE TABLE IF NOT EXISTS idea_likes (
+                    idea_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(idea_id, user_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_idea_likes_user ON idea_likes(user_id);
+
+                CREATE TABLE IF NOT EXISTS idea_comments (
+                    id TEXT PRIMARY KEY,
+                    idea_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    author_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    deleted_at TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_idea_comments_idea ON idea_comments(idea_id, created_at);
 
                 CREATE TABLE IF NOT EXISTS reminder_settings (
                     user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -173,6 +236,41 @@ class TodoDatabase:
             conn.execute(
                 "INSERT OR IGNORE INTO sync_meta(key, value) VALUES('global_seq', 0)"
             )
+            self._migrate_schema(conn)
+
+    def _migrate_schema(self, conn: sqlite3.Connection) -> None:
+        user_columns = self._table_columns(conn, "users")
+        if "circle_id" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN circle_id TEXT")
+
+        task_columns = self._table_columns(conn, "tasks")
+        if "visibility" not in task_columns:
+            conn.execute("ALTER TABLE tasks ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'")
+
+        users_without_circle = conn.execute(
+            "SELECT id FROM users WHERE circle_id IS NULL OR circle_id = ''"
+        ).fetchall()
+        for row in users_without_circle:
+            conn.execute(
+                "UPDATE users SET circle_id = ? WHERE id = ?",
+                (self._unique_circle_id(conn), row["id"]),
+            )
+
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_circle_id ON users(circle_id)")
+
+    def _table_columns(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
+        return {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+
+    def _unique_circle_id(self, conn: sqlite3.Connection) -> str:
+        for _ in range(20):
+            circle_id = generate_circle_id()
+            exists = conn.execute(
+                "SELECT 1 FROM users WHERE circle_id = ?",
+                (circle_id,),
+            ).fetchone()
+            if not exists:
+                return circle_id
+        raise DatabaseError("failed to generate circle id", 500)
 
     def _next_sync_seq(self, conn: sqlite3.Connection) -> int:
         row = conn.execute(
@@ -202,12 +300,13 @@ class TodoDatabase:
         with self._lock, self.connect() as conn:
             try:
                 seq = self._next_sync_seq(conn)
+                circle_id = self._unique_circle_id(conn)
                 conn.execute(
                     """
-                    INSERT INTO users(id, username, email, password_salt, password_hash, created_at, updated_at)
-                    VALUES(?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO users(id, username, email, circle_id, password_salt, password_hash, created_at, updated_at)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (user_id, username, email, salt, password_hash, now, now),
+                    (user_id, username, email, circle_id, salt, password_hash, now, now),
                 )
                 conn.execute(
                     """
@@ -287,9 +386,9 @@ class TodoDatabase:
                     """
                     INSERT INTO tasks(
                         id, user_id, title, content, status, category, priority,
-                        created_at, updated_at, version, deleted_at, sync_seq
+                        visibility, created_at, updated_at, version, deleted_at, sync_seq
                     )
-                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -299,6 +398,7 @@ class TodoDatabase:
                         task["status"],
                         task["category"],
                         task["priority"],
+                        task["visibility"],
                         created_at,
                         updated_at,
                         version,
@@ -338,6 +438,7 @@ class TodoDatabase:
                 "status": row["status"],
                 "category": row["category"],
                 "priority": row["priority"],
+                "visibility": row["visibility"],
             }
             values.update(patch)
             updated_at = payload.get("updatedAt") or utc_now()
@@ -347,7 +448,7 @@ class TodoDatabase:
             conn.execute(
                 """
                 UPDATE tasks
-                SET title = ?, content = ?, status = ?, category = ?, priority = ?,
+                SET title = ?, content = ?, status = ?, category = ?, priority = ?, visibility = ?,
                     updated_at = ?, version = ?, deleted_at = ?, sync_seq = ?
                 WHERE id = ? AND user_id = ?
                 """,
@@ -357,6 +458,7 @@ class TodoDatabase:
                     values["status"],
                     values["category"],
                     values["priority"],
+                    values["visibility"],
                     updated_at,
                     next_version,
                     deleted_at,
@@ -609,9 +711,9 @@ class TodoDatabase:
                         """
                         INSERT INTO tasks(
                             id, user_id, title, content, status, category, priority,
-                            created_at, updated_at, version, deleted_at, sync_seq
+                            visibility, created_at, updated_at, version, deleted_at, sync_seq
                         )
-                        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             task_id,
@@ -621,6 +723,7 @@ class TodoDatabase:
                             task["status"],
                             task["category"],
                             task["priority"],
+                            task["visibility"],
                             payload.get("createdAt") or local_updated_at,
                             payload.get("updatedAt") or local_updated_at,
                             int(payload.get("version") or 1),
@@ -665,13 +768,14 @@ class TodoDatabase:
                         "status": row["status"],
                         "category": row["category"],
                         "priority": row["priority"],
+                        "visibility": row["visibility"],
                     }
                     values.update(patch)
                     seq = self._next_sync_seq(conn)
                     conn.execute(
                         """
                         UPDATE tasks
-                        SET title = ?, content = ?, status = ?, category = ?, priority = ?,
+                        SET title = ?, content = ?, status = ?, category = ?, priority = ?, visibility = ?,
                             updated_at = ?, version = ?, deleted_at = ?, sync_seq = ?
                         WHERE id = ? AND user_id = ?
                         """,
@@ -681,6 +785,7 @@ class TodoDatabase:
                             values["status"],
                             values["category"],
                             values["priority"],
+                            values["visibility"],
                             payload.get("updatedAt") or local_updated_at,
                             int(row["version"]) + 1,
                             payload.get("deletedAt", row["deleted_at"]),
@@ -711,6 +816,317 @@ class TodoDatabase:
             "conflicts": conflicts,
             "nextCursor": str(next_cursor),
         }
+
+    def get_my_circle(self, user_id: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+            member_count = conn.execute(
+                "SELECT COUNT(*) AS total FROM circle_members WHERE circle_id = ?",
+                (user["circle_id"],),
+            ).fetchone()["total"]
+        return {
+            "circleId": user["circle_id"],
+            "owner": row_to_public_user(user),
+            "memberCount": member_count,
+        }
+
+    def join_circle(self, user_id: str, circle_id: str) -> dict[str, Any]:
+        circle_id = normalize_circle_id(circle_id)
+        now = utc_now()
+        with self._lock, self.connect() as conn:
+            owner = conn.execute(
+                "SELECT * FROM users WHERE circle_id = ?",
+                (circle_id,),
+            ).fetchone()
+            if not owner:
+                raise DatabaseError("circle not found", 404)
+            if owner["id"] == user_id:
+                raise DatabaseError("cannot join your own circle")
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO circle_members(circle_id, member_user_id, joined_at)
+                VALUES(?, ?, ?)
+                """,
+                (circle_id, user_id, now),
+            )
+            joined = conn.execute(
+                """
+                SELECT circle_members.joined_at, users.*
+                FROM circle_members
+                JOIN users ON users.circle_id = circle_members.circle_id
+                WHERE circle_members.circle_id = ?
+                  AND circle_members.member_user_id = ?
+                """,
+                (circle_id, user_id),
+            ).fetchone()
+        return {
+            "circleId": circle_id,
+            "owner": row_to_public_user(joined),
+            "joinedAt": joined["joined_at"],
+        }
+
+    def list_joined_circles(self, user_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT circle_members.joined_at, users.*
+                FROM circle_members
+                JOIN users ON users.circle_id = circle_members.circle_id
+                WHERE circle_members.member_user_id = ?
+                ORDER BY circle_members.joined_at DESC
+                """,
+                (user_id,),
+            ).fetchall()
+        return [
+            {
+                "circleId": row["circle_id"],
+                "owner": row_to_public_user(row),
+                "joinedAt": row["joined_at"],
+            }
+            for row in rows
+        ]
+
+    def leave_circle(self, user_id: str, circle_id: str) -> dict[str, Any]:
+        circle_id = normalize_circle_id(circle_id)
+        with self._lock, self.connect() as conn:
+            conn.execute(
+                "DELETE FROM circle_members WHERE circle_id = ? AND member_user_id = ?",
+                (circle_id, user_id),
+            )
+        return {"left": True, "circleId": circle_id}
+
+    def feed(self, user_id: str, query: dict[str, list[str]]) -> dict[str, Any]:
+        circle_id = first(query.get("circleId"))
+        if circle_id:
+            circle_id = normalize_circle_id(circle_id)
+            if not self._is_circle_member(user_id, circle_id):
+                raise DatabaseError("circle not joined", 403)
+
+        page = max(1, parse_int(first(query.get("page")), 1))
+        page_size = min(100, max(1, parse_int(first(query.get("pageSize")), 20)))
+        offset = (page - 1) * page_size
+
+        where = [
+            "tasks.visibility = 'circle'",
+            "tasks.deleted_at IS NULL",
+            "circle_members.member_user_id = ?",
+        ]
+        params: list[Any] = [user_id]
+        if circle_id:
+            where.append("users.circle_id = ?")
+            params.append(circle_id)
+        where_sql = " AND ".join(where)
+
+        with self.connect() as conn:
+            total = conn.execute(
+                f"""
+                SELECT COUNT(*) AS total
+                FROM tasks
+                JOIN users ON users.id = tasks.user_id
+                JOIN circle_members ON circle_members.circle_id = users.circle_id
+                WHERE {where_sql}
+                """,
+                params,
+            ).fetchone()["total"]
+            rows = conn.execute(
+                f"""
+                SELECT
+                    tasks.*,
+                    users.id AS author_id,
+                    users.username AS author_username,
+                    users.circle_id AS author_circle_id,
+                    (SELECT COUNT(*) FROM idea_likes WHERE idea_likes.idea_id = tasks.id) AS like_count,
+                    (
+                        SELECT COUNT(*)
+                        FROM idea_comments
+                        WHERE idea_comments.idea_id = tasks.id
+                          AND idea_comments.deleted_at IS NULL
+                    ) AS comment_count,
+                    EXISTS(
+                        SELECT 1
+                        FROM idea_likes
+                        WHERE idea_likes.idea_id = tasks.id
+                          AND idea_likes.user_id = ?
+                    ) AS liked_by_me
+                FROM tasks
+                JOIN users ON users.id = tasks.user_id
+                JOIN circle_members ON circle_members.circle_id = users.circle_id
+                WHERE {where_sql}
+                ORDER BY tasks.updated_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                [user_id, *params, page_size, offset],
+            ).fetchall()
+        return {
+            "items": [self._feed_item(row) for row in rows],
+            "page": page,
+            "pageSize": page_size,
+            "total": total,
+        }
+
+    def like_idea(self, user_id: str, idea_id: str) -> dict[str, Any]:
+        self._require_viewable_idea(user_id, idea_id)
+        with self._lock, self.connect() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO idea_likes(idea_id, user_id, created_at)
+                VALUES(?, ?, ?)
+                """,
+                (idea_id, user_id, utc_now()),
+            )
+            return self._idea_social_counts(conn, idea_id, user_id)
+
+    def unlike_idea(self, user_id: str, idea_id: str) -> dict[str, Any]:
+        self._require_viewable_idea(user_id, idea_id)
+        with self._lock, self.connect() as conn:
+            conn.execute(
+                "DELETE FROM idea_likes WHERE idea_id = ? AND user_id = ?",
+                (idea_id, user_id),
+            )
+            return self._idea_social_counts(conn, idea_id, user_id)
+
+    def list_comments(self, user_id: str, idea_id: str) -> list[dict[str, Any]]:
+        self._require_viewable_idea(user_id, idea_id)
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    idea_comments.*,
+                    users.id AS author_id,
+                    users.username AS author_username,
+                    users.circle_id AS author_circle_id
+                FROM idea_comments
+                JOIN users ON users.id = idea_comments.author_id
+                WHERE idea_comments.idea_id = ?
+                  AND idea_comments.deleted_at IS NULL
+                ORDER BY idea_comments.created_at ASC
+                """,
+                (idea_id,),
+            ).fetchall()
+        return [row_to_comment(row) for row in rows]
+
+    def create_comment(self, user_id: str, idea_id: str, content: str) -> dict[str, Any]:
+        self._require_viewable_idea(user_id, idea_id)
+        content = (content or "").strip()
+        if not 1 <= len(content) <= 1000:
+            raise DatabaseError("comment content must be 1-1000 characters")
+        comment_id = str(uuid.uuid4())
+        now = utc_now()
+        with self._lock, self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO idea_comments(id, idea_id, author_id, content, created_at)
+                VALUES(?, ?, ?, ?, ?)
+                """,
+                (comment_id, idea_id, user_id, content, now),
+            )
+            row = conn.execute(
+                """
+                SELECT
+                    idea_comments.*,
+                    users.id AS author_id,
+                    users.username AS author_username,
+                    users.circle_id AS author_circle_id
+                FROM idea_comments
+                JOIN users ON users.id = idea_comments.author_id
+                WHERE idea_comments.id = ?
+                """,
+                (comment_id,),
+            ).fetchone()
+        return row_to_comment(row)
+
+    def delete_comment(self, user_id: str, comment_id: str) -> dict[str, Any]:
+        with self._lock, self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM idea_comments WHERE id = ? AND deleted_at IS NULL",
+                (comment_id,),
+            ).fetchone()
+            if not row:
+                raise DatabaseError("comment not found", 404)
+            if row["author_id"] != user_id:
+                raise DatabaseError("cannot delete another user's comment", 403)
+            conn.execute(
+                "UPDATE idea_comments SET deleted_at = ? WHERE id = ?",
+                (utc_now(), comment_id),
+            )
+        return {"deleted": True, "commentId": comment_id}
+
+    def _feed_item(self, row: sqlite3.Row) -> dict[str, Any]:
+        item = row_to_task(row)
+        item["author"] = {
+            "id": row["author_id"],
+            "username": row["author_username"],
+            "circleId": row["author_circle_id"],
+        }
+        item["likeCount"] = row["like_count"]
+        item["commentCount"] = row["comment_count"]
+        item["likedByMe"] = bool(row["liked_by_me"])
+        return item
+
+    def _idea_social_counts(self, conn: sqlite3.Connection, idea_id: str, user_id: str) -> dict[str, Any]:
+        counts = conn.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM idea_likes WHERE idea_id = ?) AS like_count,
+                (
+                    SELECT COUNT(*)
+                    FROM idea_comments
+                    WHERE idea_id = ?
+                      AND deleted_at IS NULL
+                ) AS comment_count,
+                EXISTS(
+                    SELECT 1
+                    FROM idea_likes
+                    WHERE idea_id = ?
+                      AND user_id = ?
+                ) AS liked_by_me
+            """,
+            (idea_id, idea_id, idea_id, user_id),
+        ).fetchone()
+        return {
+            "ideaId": idea_id,
+            "likeCount": counts["like_count"],
+            "commentCount": counts["comment_count"],
+            "likedByMe": bool(counts["liked_by_me"]),
+        }
+
+    def _require_viewable_idea(self, user_id: str, idea_id: str) -> sqlite3.Row:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT tasks.*, users.circle_id AS author_circle_id
+                FROM tasks
+                JOIN users ON users.id = tasks.user_id
+                WHERE tasks.id = ?
+                  AND tasks.deleted_at IS NULL
+                """,
+                (idea_id,),
+            ).fetchone()
+            if not row:
+                raise DatabaseError("idea not found", 404)
+            if row["user_id"] == user_id:
+                return row
+            if row["visibility"] == "circle" and self._is_circle_member(user_id, row["author_circle_id"], conn):
+                return row
+        raise DatabaseError("idea not visible", 403)
+
+    def _is_circle_member(
+        self,
+        user_id: str,
+        circle_id: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> bool:
+        owns_connection = conn is None
+        conn = conn or self.connect()
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM circle_members WHERE circle_id = ? AND member_user_id = ?",
+                (circle_id, user_id),
+            ).fetchone()
+            return row is not None
+        finally:
+            if owns_connection:
+                conn.close()
 
     def _record_operation(
         self,
@@ -773,6 +1189,12 @@ def normalize_task_payload(payload: dict[str, Any], require_title: bool) -> dict
             raise DatabaseError("priority is invalid")
         normalized["priority"] = priority
 
+    visibility = payload.get("visibility", "private" if require_title else None)
+    if visibility is not None:
+        if visibility not in TASK_VISIBILITIES:
+            raise DatabaseError("visibility must be private or circle")
+        normalized["visibility"] = visibility
+
     return normalized
 
 
@@ -787,6 +1209,13 @@ def parse_int(value: str | None, default: int) -> int:
         return int(value)
     except ValueError as exc:
         raise DatabaseError("integer query parameter is invalid") from exc
+
+
+def normalize_circle_id(circle_id: str) -> str:
+    circle_id = (circle_id or "").strip().upper()
+    if not 4 <= len(circle_id) <= 32:
+        raise DatabaseError("circleId is invalid")
+    return circle_id
 
 
 def is_uuidish(value: str) -> bool:

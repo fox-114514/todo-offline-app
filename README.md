@@ -1,10 +1,18 @@
-# 离线优先 ToDo App
+# Idea Board
 
 这是按 [docs/requirements.md](docs/requirements.md) 实现的个人任务管理项目，包含：
 
 - `backend/`：Python 标准库实现的 REST JSON API，SQLite 存储，无第三方依赖。
 - `android/`：Kotlin + Jetpack Compose + SQLiteOpenHelper + Retrofit + WorkManager + AlarmManager 安卓客户端。
 - `docs/API.md`：接口请求/响应说明。
+
+核心体验：
+
+- 个人 idea 离线优先，没网也能创建、编辑、删除。
+- 每个用户自动拥有一个唯一好友圈 ID。
+- 其他用户可以通过好友圈 ID 加入你的好友圈。
+- idea 可以设为私密，也可以公开到自己的好友圈。
+- 加入别人好友圈后，可以刷公开 idea、点赞、评论。
 
 ## 后端启动
 
@@ -278,7 +286,13 @@ http://服务器公网IP:8000/
 ## 已实现功能
 
 - 用户注册、登录、登出、Bearer token 鉴权。
-- 任务创建、列表、搜索、筛选、编辑、软删除、随机任务。
+- idea 创建、列表、搜索、筛选、编辑、软删除、随机抽取。
+- idea 可见性：私密 / 好友圈公开。
+- 每个用户自动生成唯一好友圈 ID。
+- 支持通过好友圈 ID 加入/退出别人的好友圈。
+- 好友圈 feed：刷已加入好友圈的公开 idea。
+- 点赞和取消点赞。
+- 一级评论。
 - SQLite 本地完整副本，读操作只读本地。
 - 本地写入后追加同步队列，网络可用时自动 push，再 pull 增量。
 - 服务端 `operationId` 幂等处理。

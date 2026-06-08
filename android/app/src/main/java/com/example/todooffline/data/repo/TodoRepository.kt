@@ -3,14 +3,20 @@ package com.example.todooffline.data.repo
 import android.content.Context
 import android.content.SharedPreferences
 import com.example.todooffline.data.AuthSession
+import com.example.todooffline.data.CircleInfo
+import com.example.todooffline.data.FeedIdea
+import com.example.todooffline.data.IdeaComment
 import com.example.todooffline.data.PendingOperation
 import com.example.todooffline.data.ReminderSettings
 import com.example.todooffline.data.SyncState
 import com.example.todooffline.data.TodoTask
+import com.example.todooffline.data.VISIBILITY_PRIVATE
 import com.example.todooffline.data.local.TodoLocalStore
 import com.example.todooffline.data.nowIso
 import com.example.todooffline.data.remote.ApiClient
 import com.example.todooffline.data.remote.AuthRequest
+import com.example.todooffline.data.remote.CommentRequest
+import com.example.todooffline.data.remote.JoinCircleRequest
 import com.example.todooffline.data.remote.OperationDto
 import com.example.todooffline.data.remote.PushRequest
 import com.example.todooffline.data.remote.RegisterRequest
@@ -43,12 +49,13 @@ class TodoRepository(context: Context) {
     fun session(): AuthSession? {
         val token = prefs.getString("token", null) ?: return null
         val username = prefs.getString("username", "已登录") ?: "已登录"
-        return AuthSession(token, username)
+        val circleId = prefs.getString("circleId", "") ?: ""
+        return AuthSession(token, username, circleId)
     }
 
     fun register(username: String, email: String, password: String): AuthSession {
         val response = api().register(RegisterRequest(username, email, password)).executeData()
-        val session = AuthSession(response.token, response.user.username)
+        val session = AuthSession(response.token, response.user.username, response.user.circleId)
         saveSession(session)
         localStore.clearAllUserData()
         sync()
@@ -57,7 +64,7 @@ class TodoRepository(context: Context) {
 
     fun login(username: String, password: String): AuthSession {
         val response = api().login(AuthRequest(username, password)).executeData()
-        val session = AuthSession(response.token, response.user.username)
+        val session = AuthSession(response.token, response.user.username, response.user.circleId)
         saveSession(session)
         localStore.clearAllUserData()
         sync()
@@ -68,7 +75,7 @@ class TodoRepository(context: Context) {
         session()?.let { current ->
             runCatching { api().logout("Bearer ${current.token}").executeData() }
         }
-        prefs.edit().remove("token").remove("username").apply()
+        prefs.edit().remove("token").remove("username").remove("circleId").apply()
         localStore.clearAllUserData()
     }
 
@@ -76,7 +83,14 @@ class TodoRepository(context: Context) {
         return localStore.visibleTasks(search, status, category, priority)
     }
 
-    fun createTask(title: String, content: String, status: String, category: String, priority: String): TodoTask {
+    fun createTask(
+        title: String,
+        content: String,
+        status: String,
+        category: String,
+        priority: String,
+        visibility: String = VISIBILITY_PRIVATE,
+    ): TodoTask {
         val now = nowIso()
         val task = TodoTask(
             title = title.trim(),
@@ -84,6 +98,7 @@ class TodoRepository(context: Context) {
             status = status,
             category = category,
             priority = priority,
+            visibility = visibility,
             createdAt = now,
             updatedAt = now,
             syncState = SyncState.PENDING,
@@ -93,7 +108,15 @@ class TodoRepository(context: Context) {
         return task
     }
 
-    fun updateTask(task: TodoTask, title: String, content: String, status: String, category: String, priority: String): TodoTask {
+    fun updateTask(
+        task: TodoTask,
+        title: String,
+        content: String,
+        status: String,
+        category: String,
+        priority: String,
+        visibility: String = task.visibility,
+    ): TodoTask {
         val now = nowIso()
         val updated = task.copy(
             title = title.trim(),
@@ -101,6 +124,7 @@ class TodoRepository(context: Context) {
             status = status,
             category = category,
             priority = priority,
+            visibility = visibility,
             updatedAt = now,
             version = task.version + 1,
             syncState = SyncState.PENDING,
@@ -184,12 +208,62 @@ class TodoRepository(context: Context) {
         return SyncResult(true, message)
     }
 
+    fun myCircle(): CircleInfo {
+        val current = session() ?: throw IllegalStateException("未登录")
+        return api().myCircle("Bearer ${current.token}").executeData().toCircleInfo()
+    }
+
+    fun joinedCircles(): List<CircleInfo> {
+        val current = session() ?: throw IllegalStateException("未登录")
+        return api().joinedCircles("Bearer ${current.token}").executeData().items.map { it.toCircleInfo() }
+    }
+
+    fun joinCircle(circleId: String): CircleInfo {
+        val current = session() ?: throw IllegalStateException("未登录")
+        return api().joinCircle("Bearer ${current.token}", JoinCircleRequest(circleId)).executeData().toCircleInfo()
+    }
+
+    fun leaveCircle(circleId: String) {
+        val current = session() ?: throw IllegalStateException("未登录")
+        api().leaveCircle("Bearer ${current.token}", circleId).executeData()
+    }
+
+    fun feed(circleId: String? = null): List<FeedIdea> {
+        val current = session() ?: throw IllegalStateException("未登录")
+        return api().feed("Bearer ${current.token}", circleId).executeData().items.map { it.toFeedIdea() }
+    }
+
+    fun setIdeaLiked(idea: FeedIdea, liked: Boolean): FeedIdea {
+        val current = session() ?: throw IllegalStateException("未登录")
+        val result = if (liked) {
+            api().likeIdea("Bearer ${current.token}", idea.task.id).executeData()
+        } else {
+            api().unlikeIdea("Bearer ${current.token}", idea.task.id).executeData()
+        }
+        return idea.copy(
+            likeCount = result.likeCount,
+            commentCount = result.commentCount,
+            likedByMe = result.likedByMe,
+        )
+    }
+
+    fun comments(ideaId: String): List<IdeaComment> {
+        val current = session() ?: throw IllegalStateException("未登录")
+        return api().comments("Bearer ${current.token}", ideaId).executeData().items.map { it.toComment() }
+    }
+
+    fun createComment(ideaId: String, content: String): IdeaComment {
+        val current = session() ?: throw IllegalStateException("未登录")
+        return api().createComment("Bearer ${current.token}", ideaId, CommentRequest(content)).executeData().toComment()
+    }
+
     fun hasPendingOperations(): Boolean = localStore.hasPendingOperations() || localStore.isReminderDirty()
 
     private fun saveSession(session: AuthSession) {
         prefs.edit()
             .putString("token", session.token)
             .putString("username", session.username)
+            .putString("circleId", session.circleId)
             .apply()
     }
 
@@ -221,6 +295,7 @@ private fun TodoTask.toPayload(): JsonObject {
         addProperty("status", status)
         addProperty("category", category)
         addProperty("priority", priority)
+        addProperty("visibility", visibility)
         addProperty("createdAt", createdAt)
         addProperty("updatedAt", updatedAt)
         addProperty("version", version)

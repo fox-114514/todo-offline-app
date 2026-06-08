@@ -16,6 +16,9 @@ const val PRIORITY_HIGH = "高"
 const val PRIORITY_MEDIUM = "中"
 const val PRIORITY_LOW = "低"
 
+const val VISIBILITY_PRIVATE = "private"
+const val VISIBILITY_CIRCLE = "circle"
+
 val taskStatuses = listOf(STATUS_TODO, STATUS_DOING, STATUS_DONE, STATUS_ABANDONED)
 val taskCategories = listOf(CATEGORY_GAME, CATEGORY_PROGRAM, CATEGORY_SKILL, CATEGORY_OTHER)
 val taskPriorities = listOf(PRIORITY_HIGH, PRIORITY_MEDIUM, PRIORITY_LOW)
@@ -27,6 +30,7 @@ data class TodoTask(
     val status: String = STATUS_TODO,
     val category: String = CATEGORY_OTHER,
     val priority: String = PRIORITY_MEDIUM,
+    val visibility: String = VISIBILITY_PRIVATE,
     val createdAt: String,
     val updatedAt: String,
     val version: Int = 1,
@@ -59,6 +63,37 @@ data class PendingOperation(
 data class AuthSession(
     val token: String,
     val username: String,
+    val circleId: String,
+)
+
+data class PublicUser(
+    val id: String,
+    val username: String,
+    val circleId: String,
+)
+
+data class CircleInfo(
+    val circleId: String,
+    val owner: PublicUser,
+    val joinedAt: String? = null,
+    val memberCount: Int? = null,
+)
+
+data class FeedIdea(
+    val task: TodoTask,
+    val author: PublicUser,
+    val likeCount: Int,
+    val commentCount: Int,
+    val likedByMe: Boolean,
+)
+
+data class IdeaComment(
+    val id: String,
+    val ideaId: String,
+    val author: PublicUser,
+    val content: String,
+    val createdAt: String,
+    val deletedAt: String? = null,
 )
 
 fun nowIso(): String {

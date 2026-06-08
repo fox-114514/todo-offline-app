@@ -58,14 +58,16 @@ class TodoApiTest(unittest.TestCase):
         self.thread.join(timeout=5)
         self.tmp.cleanup()
 
-    def register(self) -> None:
-        response = self.client.request(
+    def register(self, client: ApiClient | None = None, username: str = "alice") -> dict:
+        client = client or self.client
+        response = client.request(
             "POST",
             "/api/auth/register",
-            {"username": "alice", "email": "alice@example.com", "password": "secret123"},
+            {"username": username, "email": f"{username}@example.com", "password": "secret123"},
         )
         self.assertEqual(response["code"], 200)
-        self.client.token = response["data"]["token"]
+        client.token = response["data"]["token"]
+        return response["data"]
 
     def test_task_crud_conflict_and_pull(self) -> None:
         self.register()
@@ -164,6 +166,79 @@ class TodoApiTest(unittest.TestCase):
         tombstones = [task for task in pulled["data"]["tasks"] if task["id"] == task_id]
         self.assertEqual(len(tombstones), 1)
         self.assertIsNotNone(tombstones[0]["deletedAt"])
+
+    def test_circle_feed_likes_and_comments(self) -> None:
+        alice = self.register(username="alice")
+        circle = self.client.request("GET", "/api/me/circle")
+        self.assertEqual(circle["code"], 200)
+        self.assertEqual(circle["data"]["circleId"], alice["user"]["circleId"])
+
+        host, port = self.server.server_address
+        bob_client = ApiClient(f"http://{host}:{port}")
+        self.register(bob_client, username="bob")
+
+        joined = bob_client.request(
+            "POST",
+            "/api/circles/join",
+            {"circleId": alice["user"]["circleId"]},
+        )
+        self.assertEqual(joined["code"], 200)
+        self.assertEqual(joined["data"]["owner"]["username"], "alice")
+
+        private_idea = self.client.request(
+            "POST",
+            "/api/ideas",
+            {
+                "id": str(uuid.uuid4()),
+                "title": "私密 idea",
+                "status": "想做",
+                "category": "其他",
+                "priority": "中",
+                "visibility": "private",
+            },
+        )
+        public_idea = self.client.request(
+            "POST",
+            "/api/ideas",
+            {
+                "id": str(uuid.uuid4()),
+                "title": "公开 idea",
+                "content": "给朋友看看",
+                "status": "想做",
+                "category": "程序",
+                "priority": "高",
+                "visibility": "circle",
+            },
+        )
+        self.assertEqual(private_idea["code"], 200)
+        self.assertEqual(public_idea["code"], 200)
+
+        feed = bob_client.request("GET", "/api/feed")
+        self.assertEqual(feed["code"], 200)
+        titles = [item["title"] for item in feed["data"]["items"]]
+        self.assertIn("公开 idea", titles)
+        self.assertNotIn("私密 idea", titles)
+        self.assertEqual(feed["data"]["items"][0]["author"]["username"], "alice")
+
+        idea_id = public_idea["data"]["id"]
+        liked = bob_client.request("POST", f"/api/ideas/{idea_id}/like")
+        self.assertEqual(liked["data"]["likeCount"], 1)
+        self.assertTrue(liked["data"]["likedByMe"])
+
+        comment = bob_client.request(
+            "POST",
+            f"/api/ideas/{idea_id}/comments",
+            {"content": "这个点子可以先做 MVP"},
+        )
+        self.assertEqual(comment["code"], 200)
+        self.assertEqual(comment["data"]["author"]["username"], "bob")
+
+        comments = self.client.request("GET", f"/api/ideas/{idea_id}/comments")
+        self.assertEqual(comments["code"], 200)
+        self.assertEqual(comments["data"]["items"][0]["content"], "这个点子可以先做 MVP")
+
+        unliked = bob_client.request("DELETE", f"/api/ideas/{idea_id}/like")
+        self.assertEqual(unliked["data"]["likeCount"], 0)
 
 
 if __name__ == "__main__":

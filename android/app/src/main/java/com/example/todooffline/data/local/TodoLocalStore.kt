@@ -9,8 +9,9 @@ import com.example.todooffline.data.PendingOperation
 import com.example.todooffline.data.ReminderSettings
 import com.example.todooffline.data.SyncState
 import com.example.todooffline.data.TodoTask
+import com.example.todooffline.data.VISIBILITY_PRIVATE
 
-class TodoLocalStore(context: Context) : SQLiteOpenHelper(context, "todo-offline.db", null, 1) {
+class TodoLocalStore(context: Context) : SQLiteOpenHelper(context, "todo-offline.db", null, 2) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
             """
@@ -21,6 +22,7 @@ class TodoLocalStore(context: Context) : SQLiteOpenHelper(context, "todo-offline
                 status TEXT NOT NULL,
                 category TEXT NOT NULL,
                 priority TEXT NOT NULL,
+                visibility TEXT NOT NULL DEFAULT 'private',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 version INTEGER NOT NULL,
@@ -71,11 +73,14 @@ class TodoLocalStore(context: Context) : SQLiteOpenHelper(context, "todo-offline
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        db.execSQL("DROP TABLE IF EXISTS tasks")
-        db.execSQL("DROP TABLE IF EXISTS pending_operations")
-        db.execSQL("DROP TABLE IF EXISTS reminder_settings")
-        db.execSQL("DROP TABLE IF EXISTS app_state")
-        onCreate(db)
+        if (oldVersion < 2) {
+            val columns = db.rawQuery("PRAGMA table_info(tasks)", emptyArray()).useRows { cursor ->
+                cursor.getString(cursor.getColumnIndexOrThrow("name"))
+            }.toSet()
+            if ("visibility" !in columns) {
+                db.execSQL("ALTER TABLE tasks ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'")
+            }
+        }
     }
 
     fun visibleTasks(search: String = "", status: String? = null, category: String? = null, priority: String? = null): List<TodoTask> {
@@ -281,6 +286,7 @@ private fun TodoTask.toValues(): ContentValues = ContentValues().apply {
     put("status", status)
     put("category", category)
     put("priority", priority)
+    put("visibility", visibility)
     put("created_at", createdAt)
     put("updated_at", updatedAt)
     put("version", version)
@@ -306,6 +312,7 @@ private fun Cursor.toTask(): TodoTask = TodoTask(
     status = getString(getColumnIndexOrThrow("status")),
     category = getString(getColumnIndexOrThrow("category")),
     priority = getString(getColumnIndexOrThrow("priority")),
+    visibility = if (hasColumn("visibility")) getString(getColumnIndexOrThrow("visibility")) else VISIBILITY_PRIVATE,
     createdAt = getString(getColumnIndexOrThrow("created_at")),
     updatedAt = getString(getColumnIndexOrThrow("updated_at")),
     version = getInt(getColumnIndexOrThrow("version")),
@@ -333,6 +340,8 @@ private fun Cursor.getStringOrNull(column: String): String? {
     val index = getColumnIndexOrThrow(column)
     return if (isNull(index)) null else getString(index)
 }
+
+private fun Cursor.hasColumn(column: String): Boolean = getColumnIndex(column) >= 0
 
 private inline fun <T> Cursor.useRows(map: (Cursor) -> T): List<T> {
     val rows = mutableListOf<T>()

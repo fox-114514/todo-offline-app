@@ -5,10 +5,14 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.todooffline.data.CATEGORY_OTHER
+import com.example.todooffline.data.CircleInfo
+import com.example.todooffline.data.FeedIdea
+import com.example.todooffline.data.IdeaComment
 import com.example.todooffline.data.PRIORITY_MEDIUM
 import com.example.todooffline.data.ReminderSettings
 import com.example.todooffline.data.STATUS_TODO
 import com.example.todooffline.data.TodoTask
+import com.example.todooffline.data.VISIBILITY_PRIVATE
 import com.example.todooffline.data.nowIso
 import com.example.todooffline.data.repo.TodoRepository
 import com.example.todooffline.reminder.ReminderScheduler
@@ -20,20 +24,31 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+enum class MainTab {
+    IDEAS,
+    FEED,
+}
+
 data class TodoUiState(
     val authenticated: Boolean = false,
     val username: String = "",
+    val circleId: String = "",
+    val tab: MainTab = MainTab.IDEAS,
     val tasks: List<TodoTask> = emptyList(),
+    val feed: List<FeedIdea> = emptyList(),
+    val joinedCircles: List<CircleInfo> = emptyList(),
+    val selectedFeedCircleId: String? = null,
+    val selectedCommentIdea: FeedIdea? = null,
+    val comments: List<IdeaComment> = emptyList(),
     val search: String = "",
     val statusFilter: String? = null,
-    val categoryFilter: String? = null,
-    val priorityFilter: String? = null,
     val reminder: ReminderSettings = ReminderSettings(updatedAt = nowIso()),
     val baseUrl: String = "",
     val offline: Boolean = false,
     val syncing: Boolean = false,
     val syncMessage: String = "未同步",
     val authError: String? = null,
+    val socialError: String? = null,
 )
 
 class TodoViewModel(
@@ -50,12 +65,14 @@ class TodoViewModel(
                 it.copy(
                     authenticated = true,
                     username = session.username,
+                    circleId = session.circleId,
                     reminder = repository.reminderSettings(),
                     syncMessage = if (repository.hasPendingOperations()) "待同步" else "本地可用",
                 )
             }
             refreshLocal()
             syncNow()
+            loadSocial()
         }
     }
 
@@ -69,6 +86,7 @@ class TodoViewModel(
                     it.copy(
                         authenticated = true,
                         username = session.username,
+                        circleId = session.circleId,
                         offline = false,
                         syncing = false,
                         syncMessage = "已登录",
@@ -76,6 +94,7 @@ class TodoViewModel(
                 }
                 refreshLocal()
                 SyncScheduler.scheduleNow(appContext)
+                loadSocial()
             }.onFailure { error ->
                 _state.update {
                     it.copy(syncing = false, offline = true, authError = error.message ?: "登录失败")
@@ -94,6 +113,7 @@ class TodoViewModel(
                     it.copy(
                         authenticated = true,
                         username = session.username,
+                        circleId = session.circleId,
                         offline = false,
                         syncing = false,
                         syncMessage = "已注册",
@@ -101,6 +121,7 @@ class TodoViewModel(
                 }
                 refreshLocal()
                 SyncScheduler.scheduleNow(appContext)
+                loadSocial()
             }.onFailure { error ->
                 _state.update {
                     it.copy(syncing = false, offline = true, authError = error.message ?: "注册失败")
@@ -118,6 +139,11 @@ class TodoViewModel(
         }
     }
 
+    fun setTab(tab: MainTab) {
+        _state.update { it.copy(tab = tab) }
+        if (tab == MainTab.FEED) loadSocial()
+    }
+
     fun setSearch(value: String) {
         _state.update { it.copy(search = value) }
         refreshLocal()
@@ -128,34 +154,33 @@ class TodoViewModel(
         refreshLocal()
     }
 
-    fun setCategoryFilter(value: String?) {
-        _state.update { it.copy(categoryFilter = value) }
-        refreshLocal()
-    }
-
-    fun setPriorityFilter(value: String?) {
-        _state.update { it.copy(priorityFilter = value) }
-        refreshLocal()
-    }
-
     fun createTask(
         title: String,
         content: String,
         status: String = STATUS_TODO,
         category: String = CATEGORY_OTHER,
         priority: String = PRIORITY_MEDIUM,
+        visibility: String = VISIBILITY_PRIVATE,
     ) {
         if (title.isBlank()) return
         viewModelScope.launch(Dispatchers.IO) {
-            repository.createTask(title, content, status, category, priority)
+            repository.createTask(title, content, status, category, priority, visibility)
             syncAfterLocalChange()
         }
     }
 
-    fun updateTask(task: TodoTask, title: String, content: String, status: String, category: String, priority: String) {
+    fun updateTask(
+        task: TodoTask,
+        title: String,
+        content: String,
+        status: String,
+        category: String,
+        priority: String,
+        visibility: String,
+    ) {
         if (title.isBlank()) return
         viewModelScope.launch(Dispatchers.IO) {
-            repository.updateTask(task, title, content, status, category, priority)
+            repository.updateTask(task, title, content, status, category, priority, visibility)
             syncAfterLocalChange()
         }
     }
@@ -191,6 +216,7 @@ class TodoViewModel(
                         syncing = false,
                         message = result.message,
                     )
+                    loadSocial()
                 }
                 .onFailure { error ->
                     refreshLocalOnMain(
@@ -199,6 +225,104 @@ class TodoViewModel(
                         message = error.message ?: "离线模式",
                     )
                 }
+        }
+    }
+
+    fun loadSocial() {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                val myCircle = repository.myCircle()
+                val joined = repository.joinedCircles()
+                val feed = repository.feed(_state.value.selectedFeedCircleId)
+                Triple(myCircle, joined, feed)
+            }.onSuccess { (myCircle, joined, feed) ->
+                _state.update {
+                    it.copy(
+                        circleId = myCircle.circleId,
+                        joinedCircles = joined,
+                        feed = feed,
+                        socialError = null,
+                    )
+                }
+            }.onFailure { error ->
+                _state.update {
+                    it.copy(socialError = error.message ?: "好友圈加载失败")
+                }
+            }
+        }
+    }
+
+    fun joinCircle(circleId: String) {
+        if (circleId.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { repository.joinCircle(circleId) }
+                .onSuccess { loadSocial() }
+                .onFailure { error -> _state.update { it.copy(socialError = error.message ?: "加入失败") } }
+        }
+    }
+
+    fun leaveCircle(circleId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { repository.leaveCircle(circleId) }
+                .onSuccess {
+                    _state.update {
+                        it.copy(selectedFeedCircleId = null)
+                    }
+                    loadSocial()
+                }
+                .onFailure { error -> _state.update { it.copy(socialError = error.message ?: "退出失败") } }
+        }
+    }
+
+    fun selectFeedCircle(circleId: String?) {
+        _state.update { it.copy(selectedFeedCircleId = circleId) }
+        loadSocial()
+    }
+
+    fun toggleLike(idea: FeedIdea) {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { repository.setIdeaLiked(idea, !idea.likedByMe) }
+                .onSuccess { updated ->
+                    _state.update { state ->
+                        state.copy(feed = state.feed.map { if (it.task.id == updated.task.id) updated else it })
+                    }
+                }
+                .onFailure { error -> _state.update { it.copy(socialError = error.message ?: "点赞失败") } }
+        }
+    }
+
+    fun openComments(idea: FeedIdea) {
+        _state.update { it.copy(selectedCommentIdea = idea, comments = emptyList()) }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { repository.comments(idea.task.id) }
+                .onSuccess { comments ->
+                    _state.update { it.copy(comments = comments, socialError = null) }
+                }
+                .onFailure { error -> _state.update { it.copy(socialError = error.message ?: "评论加载失败") } }
+        }
+    }
+
+    fun closeComments() {
+        _state.update { it.copy(selectedCommentIdea = null, comments = emptyList()) }
+    }
+
+    fun createComment(content: String) {
+        val idea = _state.value.selectedCommentIdea ?: return
+        if (content.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { repository.createComment(idea.task.id, content) }
+                .onSuccess { comment ->
+                    _state.update { state ->
+                        state.copy(
+                            comments = state.comments + comment,
+                            feed = state.feed.map {
+                                if (it.task.id == idea.task.id) it.copy(commentCount = it.commentCount + 1) else it
+                            },
+                            socialError = null,
+                        )
+                    }
+                }
+                .onFailure { error -> _state.update { it.copy(socialError = error.message ?: "评论失败") } }
         }
     }
 
@@ -212,6 +336,7 @@ class TodoViewModel(
         runCatching { repository.sync() }
             .onSuccess { result ->
                 refreshLocalOnMain(!result.online, false, result.message)
+                loadSocial()
             }
             .onFailure {
                 refreshLocalOnMain(true, false, "离线模式，稍后自动同步")
@@ -223,8 +348,8 @@ class TodoViewModel(
         val tasks = repository.tasks(
             search = current.search,
             status = current.statusFilter,
-            category = current.categoryFilter,
-            priority = current.priorityFilter,
+            category = null,
+            priority = null,
         )
         _state.update {
             it.copy(
@@ -239,7 +364,7 @@ class TodoViewModel(
         viewModelScope.launch(Dispatchers.Main) {
             val current = _state.value
             val tasks = withContext(Dispatchers.IO) {
-                repository.tasks(current.search, current.statusFilter, current.categoryFilter, current.priorityFilter)
+                repository.tasks(current.search, current.statusFilter, null, null)
             }
             _state.update {
                 it.copy(

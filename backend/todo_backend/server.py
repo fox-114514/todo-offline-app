@@ -94,16 +94,54 @@ class TodoRequestHandler(BaseHTTPRequestHandler):
             self.db.revoke_token(token)
             return {"loggedOut": True}
 
-        if method == "GET" and path == "/api/tasks":
+        if method == "GET" and path == "/api/me/circle":
+            return self.db.get_my_circle(user["id"])
+
+        if method == "POST" and path == "/api/circles/join":
+            body = self._read_json()
+            return self.db.join_circle(user["id"], body.get("circleId", ""))
+
+        if method == "GET" and path == "/api/circles/joined":
+            return {"items": self.db.list_joined_circles(user["id"])}
+
+        circle_leave_match = re.fullmatch(r"/api/circles/([^/]+)/leave", path)
+        if circle_leave_match and method == "DELETE":
+            return self.db.leave_circle(user["id"], circle_leave_match.group(1))
+
+        if method == "GET" and path == "/api/feed":
+            return self.db.feed(user["id"], query)
+
+        idea_like_match = re.fullmatch(r"/api/ideas/([^/]+)/like", path)
+        if idea_like_match:
+            idea_id = idea_like_match.group(1)
+            if method == "POST":
+                return self.db.like_idea(user["id"], idea_id)
+            if method == "DELETE":
+                return self.db.unlike_idea(user["id"], idea_id)
+
+        idea_comments_match = re.fullmatch(r"/api/ideas/([^/]+)/comments", path)
+        if idea_comments_match:
+            idea_id = idea_comments_match.group(1)
+            if method == "GET":
+                return {"items": self.db.list_comments(user["id"], idea_id)}
+            if method == "POST":
+                body = self._read_json()
+                return self.db.create_comment(user["id"], idea_id, body.get("content", ""))
+
+        comment_match = re.fullmatch(r"/api/comments/([^/]+)", path)
+        if comment_match and method == "DELETE":
+            return self.db.delete_comment(user["id"], comment_match.group(1))
+
+        if method == "GET" and path in {"/api/tasks", "/api/ideas"}:
             return self.db.list_tasks(user["id"], query)
 
-        if method == "GET" and path == "/api/tasks/random":
+        if method == "GET" and path in {"/api/tasks/random", "/api/ideas/random"}:
             return {"task": self.db.random_task(user["id"])}
 
-        if method == "POST" and path == "/api/tasks":
+        if method == "POST" and path in {"/api/tasks", "/api/ideas"}:
             return self.db.create_task(user["id"], self._read_json())
 
-        task_match = re.fullmatch(r"/api/tasks/([^/]+)", path)
+        task_match = re.fullmatch(r"/api/(?:tasks|ideas)/([^/]+)", path)
         if task_match:
             task_id = task_match.group(1)
             if method == "GET":
