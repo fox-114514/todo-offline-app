@@ -26,14 +26,72 @@ cd backend
 python3 -m unittest discover -s tests
 ```
 
-## Docker
+## 后端服务器部署教程
 
-项目根目录提供了 `docker-compose.yml`，推荐服务器部署时使用它。
+推荐在服务器上使用 Docker Compose 部署后端。下面以 Ubuntu/Debian 服务器为例。
+
+### 1. 登录服务器
+
+```bash
+ssh root@你的服务器公网IP
+```
+
+### 2. 安装 Docker 和 Git
+
+```bash
+apt update
+apt install -y git docker.io docker-compose-plugin
+systemctl enable --now docker
+```
+
+确认 Docker 可用：
+
+```bash
+docker --version
+docker compose version
+```
+
+### 3. 拉取项目代码
+
+```bash
+cd /opt
+git clone https://github.com/fox-114514/todo-offline-app.git
+cd todo-offline-app
+```
+
+### 4. 配置环境变量
+
+复制示例配置：
 
 ```bash
 cp .env.example .env
+```
+
+默认后端对外端口是 `8000`。如果要改端口，编辑 `.env`：
+
+```bash
+nano .env
+```
+
+示例：
+
+```text
+TODO_BACKEND_PUBLIC_PORT=8000
+```
+
+### 5. 启动后端
+
+```bash
 docker compose up -d --build
 ```
+
+查看容器状态：
+
+```bash
+docker compose ps
+```
+
+正常会看到 `todo-backend` 状态为 `Up`。
 
 查看日志：
 
@@ -41,40 +99,140 @@ docker compose up -d --build
 docker compose logs -f todo-backend
 ```
 
-停止服务：
+按 `Ctrl+C` 可以退出日志查看，不会停止服务。
+
+### 6. 测试服务
+
+在服务器本机测试：
+
+```bash
+curl http://127.0.0.1:8000/api/health
+```
+
+正常响应：
+
+```json
+{"code":200,"message":"success","data":{"ok":true}}
+```
+
+在你的电脑或手机网络测试：
+
+```bash
+curl http://你的服务器公网IP:8000/api/health
+```
+
+如果服务器本机可以访问，但公网访问失败，通常是防火墙或云服务商安全组没有开放 `8000` 端口。
+
+Ubuntu 防火墙开放端口：
+
+```bash
+ufw allow 8000/tcp
+```
+
+还需要到云服务器控制台确认安全组/防火墙规则允许 TCP `8000` 入站。
+
+### 7. 安卓客户端填写后端地址
+
+真机安装 APK 后，登录页或设置页的后端地址填写：
+
+```text
+http://你的服务器公网IP:8000/
+```
+
+注意末尾 `/` 要保留。
+
+当前 debug APK 已允许访问 HTTP 明文后端地址。正式长期使用建议给服务器配置域名和 HTTPS，然后在 App 里填写：
+
+```text
+https://你的域名/
+```
+
+### 8. 更新后端
+
+本地代码推送到 GitHub 后，在服务器上执行：
+
+```bash
+cd /opt/todo-offline-app
+git pull
+docker compose up -d --build
+```
+
+### 9. 停止和重启
 
 ```bash
 docker compose down
 ```
 
-### 服务器 Git 部署
-
-首次部署：
+重新启动：
 
 ```bash
-git clone <你的仓库地址> todo-offline-app
-cd todo-offline-app
-cp .env.example .env
-docker compose up -d --build
-curl http://127.0.0.1:8000/api/health
+docker compose up -d
 ```
 
-以后更新：
+### 10. 数据位置和备份
+
+SQLite 数据保存在 Docker volume `todo_backend_data` 中，更新镜像不会删除数据。
+
+备份数据库：
 
 ```bash
-cd todo-offline-app
-git pull
-docker compose up -d --build
-```
-
-SQLite 数据保存在 Docker volume `todo_backend_data` 中，更新镜像不会删除数据。备份数据库：
-
-```bash
+cd /opt/todo-offline-app
 mkdir -p backups
 docker run --rm \
   -v todo-offline-app_todo_backend_data:/data \
   -v "$PWD/backups:/backup" \
   busybox cp /data/todo.sqlite3 /backup/todo.sqlite3
+```
+
+恢复数据库前建议先停止服务：
+
+```bash
+docker compose down
+docker run --rm \
+  -v todo-offline-app_todo_backend_data:/data \
+  -v "$PWD/backups:/backup" \
+  busybox cp /backup/todo.sqlite3 /data/todo.sqlite3
+docker compose up -d
+```
+
+### 11. 常见排错
+
+查看后端日志：
+
+```bash
+docker compose logs -f todo-backend
+```
+
+查看端口监听：
+
+```bash
+docker compose ps
+ss -lntp | grep 8000
+```
+
+重新构建：
+
+```bash
+docker compose up -d --build
+```
+
+如果 App 提示 `CLEARTEXT communication not permitted`，说明安装的 APK 不是当前新版 debug 包，请重新安装最新的 `app-debug.apk`。
+
+如果 App 提示连接超时，优先检查：
+
+- 后端地址是否写成 `http://服务器公网IP:8000/`
+- 服务器 `curl http://127.0.0.1:8000/api/health` 是否成功
+- 云服务商安全组是否开放 `8000`
+- 服务器防火墙是否开放 `8000/tcp`
+
+### 12. 手动 Docker 命令
+
+如果不用 Compose，也可以只在 `backend/` 目录手动运行：
+
+```bash
+cd backend
+docker build -t todo-backend .
+docker run --rm -p 8000:8000 -v "$PWD/data:/data" todo-backend
 ```
 
 ## 构建安卓 APK
