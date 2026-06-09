@@ -7,8 +7,10 @@ import androidx.lifecycle.viewModelScope
 import com.example.todooffline.data.CATEGORY_OTHER
 import com.example.todooffline.data.CircleInfo
 import com.example.todooffline.data.FeedIdea
+import com.example.todooffline.data.FriendRequest
 import com.example.todooffline.data.IdeaComment
 import com.example.todooffline.data.PRIORITY_MEDIUM
+import com.example.todooffline.data.PublicUser
 import com.example.todooffline.data.ReminderSettings
 import com.example.todooffline.data.STATUS_TODO
 import com.example.todooffline.data.TodoTask
@@ -36,9 +38,11 @@ data class TodoUiState(
     val tab: MainTab = MainTab.IDEAS,
     val tasks: List<TodoTask> = emptyList(),
     val feed: List<FeedIdea> = emptyList(),
-    val joinedCircles: List<CircleInfo> = emptyList(),
+    val friends: List<CircleInfo> = emptyList(),
+    val incomingFriendRequests: List<FriendRequest> = emptyList(),
+    val outgoingFriendRequests: List<FriendRequest> = emptyList(),
     val selectedFeedCircleId: String? = null,
-    val selectedCommentIdea: FeedIdea? = null,
+    val selectedIdea: FeedIdea? = null,
     val comments: List<IdeaComment> = emptyList(),
     val search: String = "",
     val statusFilter: String? = null,
@@ -49,6 +53,14 @@ data class TodoUiState(
     val syncMessage: String = "未同步",
     val authError: String? = null,
     val socialError: String? = null,
+)
+
+private data class SocialSnapshot(
+    val myCircle: CircleInfo,
+    val friends: List<CircleInfo>,
+    val incoming: List<FriendRequest>,
+    val outgoing: List<FriendRequest>,
+    val feed: List<FeedIdea>,
 )
 
 class TodoViewModel(
@@ -232,15 +244,19 @@ class TodoViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
                 val myCircle = repository.myCircle()
-                val joined = repository.joinedCircles()
+                val friends = repository.friends()
+                val incoming = repository.incomingFriendRequests()
+                val outgoing = repository.outgoingFriendRequests()
                 val feed = repository.feed(_state.value.selectedFeedCircleId)
-                Triple(myCircle, joined, feed)
-            }.onSuccess { (myCircle, joined, feed) ->
+                SocialSnapshot(myCircle, friends, incoming, outgoing, feed)
+            }.onSuccess { snapshot ->
                 _state.update {
                     it.copy(
-                        circleId = myCircle.circleId,
-                        joinedCircles = joined,
-                        feed = feed,
+                        circleId = snapshot.myCircle.circleId,
+                        friends = snapshot.friends,
+                        incomingFriendRequests = snapshot.incoming,
+                        outgoingFriendRequests = snapshot.outgoing,
+                        feed = snapshot.feed,
                         socialError = null,
                     )
                 }
@@ -252,25 +268,41 @@ class TodoViewModel(
         }
     }
 
-    fun joinCircle(circleId: String) {
-        if (circleId.isBlank()) return
+    fun sendFriendRequest(circleId: String, introduction: String) {
+        if (circleId.isBlank() || introduction.isBlank()) return
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { repository.joinCircle(circleId) }
+            runCatching { repository.createFriendRequest(circleId, introduction) }
                 .onSuccess { loadSocial() }
-                .onFailure { error -> _state.update { it.copy(socialError = error.message ?: "加入失败") } }
+                .onFailure { error -> _state.update { it.copy(socialError = error.message ?: "申请失败") } }
         }
     }
 
-    fun leaveCircle(circleId: String) {
+    fun acceptFriendRequest(requestId: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { repository.leaveCircle(circleId) }
+            runCatching { repository.acceptFriendRequest(requestId) }
+                .onSuccess { loadSocial() }
+                .onFailure { error -> _state.update { it.copy(socialError = error.message ?: "通过失败") } }
+        }
+    }
+
+    fun rejectFriendRequest(requestId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { repository.rejectFriendRequest(requestId) }
+                .onSuccess { loadSocial() }
+                .onFailure { error -> _state.update { it.copy(socialError = error.message ?: "拒绝失败") } }
+        }
+    }
+
+    fun removeFriend(circleId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { repository.removeFriend(circleId) }
                 .onSuccess {
                     _state.update {
                         it.copy(selectedFeedCircleId = null)
                     }
                     loadSocial()
                 }
-                .onFailure { error -> _state.update { it.copy(socialError = error.message ?: "退出失败") } }
+                .onFailure { error -> _state.update { it.copy(socialError = error.message ?: "删除好友失败") } }
         }
     }
 
@@ -284,30 +316,41 @@ class TodoViewModel(
             runCatching { repository.setIdeaLiked(idea, !idea.likedByMe) }
                 .onSuccess { updated ->
                     _state.update { state ->
-                        state.copy(feed = state.feed.map { if (it.task.id == updated.task.id) updated else it })
+                        state.copy(
+                            feed = state.feed.map { if (it.task.id == updated.task.id) updated else it },
+                            selectedIdea = state.selectedIdea?.let { if (it.task.id == updated.task.id) updated else it },
+                        )
                     }
                 }
                 .onFailure { error -> _state.update { it.copy(socialError = error.message ?: "点赞失败") } }
         }
     }
 
-    fun openComments(idea: FeedIdea) {
-        _state.update { it.copy(selectedCommentIdea = idea, comments = emptyList()) }
+    fun openIdeaDetail(idea: FeedIdea) {
+        _state.update { it.copy(selectedIdea = idea, comments = emptyList()) }
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { repository.comments(idea.task.id) }
-                .onSuccess { comments ->
-                    _state.update { it.copy(comments = comments, socialError = null) }
+            runCatching {
+                val detail = repository.ideaDetail(idea.task.id)
+                val comments = repository.comments(idea.task.id)
+                detail to comments
+            }.onSuccess { (detail, comments) ->
+                    _state.update { it.copy(selectedIdea = detail, comments = comments, socialError = null) }
                 }
-                .onFailure { error -> _state.update { it.copy(socialError = error.message ?: "评论加载失败") } }
+                .onFailure { error -> _state.update { it.copy(socialError = error.message ?: "详情加载失败") } }
         }
     }
 
-    fun closeComments() {
-        _state.update { it.copy(selectedCommentIdea = null, comments = emptyList()) }
+    fun openLocalIdeaDetail(task: TodoTask) {
+        val author = PublicUser(id = "", username = _state.value.username, circleId = _state.value.circleId)
+        openIdeaDetail(FeedIdea(task, author, likeCount = 0, commentCount = 0, likedByMe = false))
+    }
+
+    fun closeIdeaDetail() {
+        _state.update { it.copy(selectedIdea = null, comments = emptyList()) }
     }
 
     fun createComment(content: String) {
-        val idea = _state.value.selectedCommentIdea ?: return
+        val idea = _state.value.selectedIdea ?: return
         if (content.isBlank()) return
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { repository.createComment(idea.task.id, content) }
@@ -316,6 +359,9 @@ class TodoViewModel(
                         state.copy(
                             comments = state.comments + comment,
                             feed = state.feed.map {
+                                if (it.task.id == idea.task.id) it.copy(commentCount = it.commentCount + 1) else it
+                            },
+                            selectedIdea = state.selectedIdea?.let {
                                 if (it.task.id == idea.task.id) it.copy(commentCount = it.commentCount + 1) else it
                             },
                             socialError = null,

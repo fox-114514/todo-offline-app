@@ -3,6 +3,7 @@ package com.example.todooffline.data.remote
 import com.example.todooffline.data.ReminderSettings
 import com.example.todooffline.data.CircleInfo
 import com.example.todooffline.data.FeedIdea
+import com.example.todooffline.data.FriendRequest
 import com.example.todooffline.data.IdeaComment
 import com.example.todooffline.data.PublicUser
 import com.example.todooffline.data.SyncState
@@ -132,6 +133,35 @@ data class JoinedCirclesResponse(
 
 data class JoinCircleRequest(
     val circleId: String,
+)
+
+data class FriendRequestCreateRequest(
+    val circleId: String,
+    val introduction: String,
+)
+
+data class FriendRequestDto(
+    val id: String,
+    val requester: PublicUserDto,
+    val target: PublicUserDto,
+    val introduction: String,
+    val status: String,
+    val createdAt: String,
+    val decidedAt: String?,
+) {
+    fun toFriendRequest(): FriendRequest = FriendRequest(
+        id = id,
+        requester = requester.toPublicUser(),
+        target = target.toPublicUser(),
+        introduction = introduction,
+        status = status,
+        createdAt = createdAt,
+        decidedAt = decidedAt,
+    )
+}
+
+data class FriendRequestsResponse(
+    val items: List<FriendRequestDto>,
 )
 
 data class FeedIdeaDto(

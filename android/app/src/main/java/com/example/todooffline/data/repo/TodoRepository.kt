@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import com.example.todooffline.data.AuthSession
 import com.example.todooffline.data.CircleInfo
 import com.example.todooffline.data.FeedIdea
+import com.example.todooffline.data.FriendRequest
 import com.example.todooffline.data.IdeaComment
 import com.example.todooffline.data.PendingOperation
 import com.example.todooffline.data.ReminderSettings
@@ -16,7 +17,7 @@ import com.example.todooffline.data.nowIso
 import com.example.todooffline.data.remote.ApiClient
 import com.example.todooffline.data.remote.AuthRequest
 import com.example.todooffline.data.remote.CommentRequest
-import com.example.todooffline.data.remote.JoinCircleRequest
+import com.example.todooffline.data.remote.FriendRequestCreateRequest
 import com.example.todooffline.data.remote.OperationDto
 import com.example.todooffline.data.remote.PushRequest
 import com.example.todooffline.data.remote.RegisterRequest
@@ -214,23 +215,63 @@ class TodoRepository(context: Context) {
     }
 
     fun joinedCircles(): List<CircleInfo> {
-        val current = session() ?: throw IllegalStateException("未登录")
-        return api().joinedCircles("Bearer ${current.token}").executeData().items.map { it.toCircleInfo() }
+        return friends()
     }
 
-    fun joinCircle(circleId: String): CircleInfo {
+    fun joinCircle(circleId: String): FriendRequest {
+        return createFriendRequest(circleId, "请求添加好友")
+    }
+
+    fun createFriendRequest(circleId: String, introduction: String): FriendRequest {
         val current = session() ?: throw IllegalStateException("未登录")
-        return api().joinCircle("Bearer ${current.token}", JoinCircleRequest(circleId)).executeData().toCircleInfo()
+        return api()
+            .createFriendRequest("Bearer ${current.token}", FriendRequestCreateRequest(circleId, introduction))
+            .executeData()
+            .toFriendRequest()
+    }
+
+    fun incomingFriendRequests(): List<FriendRequest> {
+        val current = session() ?: throw IllegalStateException("未登录")
+        return api().incomingFriendRequests("Bearer ${current.token}").executeData().items.map { it.toFriendRequest() }
+    }
+
+    fun outgoingFriendRequests(): List<FriendRequest> {
+        val current = session() ?: throw IllegalStateException("未登录")
+        return api().outgoingFriendRequests("Bearer ${current.token}").executeData().items.map { it.toFriendRequest() }
+    }
+
+    fun acceptFriendRequest(requestId: String): FriendRequest {
+        val current = session() ?: throw IllegalStateException("未登录")
+        return api().acceptFriendRequest("Bearer ${current.token}", requestId).executeData().toFriendRequest()
+    }
+
+    fun rejectFriendRequest(requestId: String): FriendRequest {
+        val current = session() ?: throw IllegalStateException("未登录")
+        return api().rejectFriendRequest("Bearer ${current.token}", requestId).executeData().toFriendRequest()
+    }
+
+    fun friends(): List<CircleInfo> {
+        val current = session() ?: throw IllegalStateException("未登录")
+        return api().friends("Bearer ${current.token}").executeData().items.map { it.toCircleInfo() }
     }
 
     fun leaveCircle(circleId: String) {
+        removeFriend(circleId)
+    }
+
+    fun removeFriend(circleId: String) {
         val current = session() ?: throw IllegalStateException("未登录")
-        api().leaveCircle("Bearer ${current.token}", circleId).executeData()
+        api().removeFriend("Bearer ${current.token}", circleId).executeData()
     }
 
     fun feed(circleId: String? = null): List<FeedIdea> {
         val current = session() ?: throw IllegalStateException("未登录")
         return api().feed("Bearer ${current.token}", circleId).executeData().items.map { it.toFeedIdea() }
+    }
+
+    fun ideaDetail(ideaId: String): FeedIdea {
+        val current = session() ?: throw IllegalStateException("未登录")
+        return api().ideaDetail("Bearer ${current.token}", ideaId).executeData().toFeedIdea()
     }
 
     fun setIdeaLiked(idea: FeedIdea, liked: Boolean): FeedIdea {

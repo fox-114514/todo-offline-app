@@ -121,6 +121,26 @@ def row_to_comment(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def row_to_friend_request(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "requester": {
+            "id": row["requester_id"],
+            "username": row["requester_username"],
+            "circleId": row["requester_circle_id"],
+        },
+        "target": {
+            "id": row["target_id"],
+            "username": row["target_username"],
+            "circleId": row["target_circle_id"],
+        },
+        "introduction": row["introduction"],
+        "status": row["status"],
+        "createdAt": row["created_at"],
+        "decidedAt": row["decided_at"],
+    }
+
+
 def generate_circle_id() -> str:
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
     return "ID-" + "".join(secrets.choice(alphabet) for _ in range(8))
@@ -190,6 +210,19 @@ class TodoDatabase:
 
                 CREATE INDEX IF NOT EXISTS idx_circle_members_user ON circle_members(member_user_id);
 
+                CREATE TABLE IF NOT EXISTS friend_requests (
+                    id TEXT PRIMARY KEY,
+                    requester_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    target_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    introduction TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    decided_at TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_friend_requests_target_status ON friend_requests(target_id, status, created_at);
+                CREATE INDEX IF NOT EXISTS idx_friend_requests_requester_status ON friend_requests(requester_id, status, created_at);
+
                 CREATE TABLE IF NOT EXISTS idea_likes (
                     idea_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
                     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -257,6 +290,21 @@ class TodoDatabase:
 
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_circle_id ON users(circle_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_visibility ON tasks(visibility, updated_at)")
+        self._backfill_bidirectional_friendships(conn)
+
+    def _backfill_bidirectional_friendships(self, conn: sqlite3.Connection) -> None:
+        now = utc_now()
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO circle_members(circle_id, member_user_id, joined_at)
+            SELECT member.circle_id, owner.id, ?
+            FROM circle_members existing
+            JOIN users owner ON owner.circle_id = existing.circle_id
+            JOIN users member ON member.id = existing.member_user_id
+            WHERE owner.id != member.id
+            """,
+            (now,),
+        )
 
     def _table_columns(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
         return {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
@@ -504,15 +552,9 @@ class TodoDatabase:
         return row_to_task(updated)
 
     def get_task(self, user_id: str, task_id: str, include_deleted: bool = False) -> dict[str, Any]:
-        sql = "SELECT * FROM tasks WHERE id = ? AND user_id = ?"
-        params: list[Any] = [task_id, user_id]
-        if not include_deleted:
-            sql += " AND deleted_at IS NULL"
         with self.connect() as conn:
-            row = conn.execute(sql, params).fetchone()
-        if not row:
-            raise DatabaseError("task not found", 404)
-        return row_to_task(row)
+            row = self._require_viewable_idea(user_id, task_id, conn, include_deleted=include_deleted)
+            return self._idea_detail(conn, user_id, row["id"])
 
     def list_tasks(self, user_id: str, query: dict[str, list[str]]) -> dict[str, Any]:
         where = ["user_id = ?", "deleted_at IS NULL"]
@@ -831,39 +873,158 @@ class TodoDatabase:
         }
 
     def join_circle(self, user_id: str, circle_id: str) -> dict[str, Any]:
+        return self.create_friend_request(user_id, circle_id, "请求添加好友")
+
+    def create_friend_request(self, user_id: str, circle_id: str, introduction: str) -> dict[str, Any]:
         circle_id = normalize_circle_id(circle_id)
+        introduction = (introduction or "").strip()
+        if not 1 <= len(introduction) <= 500:
+            raise DatabaseError("introduction must be 1-500 characters")
         now = utc_now()
+        request_id = str(uuid.uuid4())
         with self._lock, self.connect() as conn:
-            owner = conn.execute(
+            requester = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+            target = conn.execute(
                 "SELECT * FROM users WHERE circle_id = ?",
                 (circle_id,),
             ).fetchone()
-            if not owner:
-                raise DatabaseError("circle not found", 404)
-            if owner["id"] == user_id:
-                raise DatabaseError("cannot join your own circle")
+            if not target:
+                raise DatabaseError("friend id not found", 404)
+            if target["id"] == user_id:
+                raise DatabaseError("cannot add yourself")
+            if self._is_circle_member(user_id, target["circle_id"], conn):
+                raise DatabaseError("already friends", 409)
+            pending = conn.execute(
+                """
+                SELECT 1
+                FROM friend_requests
+                WHERE requester_id = ?
+                  AND target_id = ?
+                  AND status = 'pending'
+                """,
+                (user_id, target["id"]),
+            ).fetchone()
+            if pending:
+                raise DatabaseError("friend request already pending", 409)
             conn.execute(
                 """
-                INSERT OR IGNORE INTO circle_members(circle_id, member_user_id, joined_at)
-                VALUES(?, ?, ?)
+                INSERT INTO friend_requests(id, requester_id, target_id, introduction, status, created_at)
+                VALUES(?, ?, ?, ?, 'pending', ?)
                 """,
-                (circle_id, user_id, now),
+                (request_id, requester["id"], target["id"], introduction, now),
             )
-            joined = conn.execute(
-                """
-                SELECT circle_members.joined_at, users.*
-                FROM circle_members
-                JOIN users ON users.circle_id = circle_members.circle_id
-                WHERE circle_members.circle_id = ?
-                  AND circle_members.member_user_id = ?
+            row = self._friend_request_row(conn, request_id)
+        return row_to_friend_request(row)
+
+    def list_friend_requests(self, user_id: str, direction: str) -> list[dict[str, Any]]:
+        if direction not in {"incoming", "outgoing"}:
+            raise DatabaseError("direction is invalid")
+        column = "target_id" if direction == "incoming" else "requester_id"
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT
+                    friend_requests.*,
+                    requester.id AS requester_id,
+                    requester.username AS requester_username,
+                    requester.circle_id AS requester_circle_id,
+                    target.id AS target_id,
+                    target.username AS target_username,
+                    target.circle_id AS target_circle_id
+                FROM friend_requests
+                JOIN users requester ON requester.id = friend_requests.requester_id
+                JOIN users target ON target.id = friend_requests.target_id
+                WHERE friend_requests.{column} = ?
+                ORDER BY friend_requests.created_at DESC
                 """,
-                (circle_id, user_id),
-            ).fetchone()
-        return {
-            "circleId": circle_id,
-            "owner": row_to_public_user(joined),
-            "joinedAt": joined["joined_at"],
-        }
+                (user_id,),
+            ).fetchall()
+        return [row_to_friend_request(row) for row in rows]
+
+    def decide_friend_request(self, user_id: str, request_id: str, accept: bool) -> dict[str, Any]:
+        now = utc_now()
+        with self._lock, self.connect() as conn:
+            request = conn.execute("SELECT * FROM friend_requests WHERE id = ?", (request_id,)).fetchone()
+            if not request:
+                raise DatabaseError("friend request not found", 404)
+            if request["target_id"] != user_id:
+                raise DatabaseError("cannot decide another user's friend request", 403)
+            if request["status"] != "pending":
+                raise DatabaseError("friend request already decided", 409)
+
+            status = "accepted" if accept else "rejected"
+            conn.execute(
+                "UPDATE friend_requests SET status = ?, decided_at = ? WHERE id = ?",
+                (status, now, request_id),
+            )
+            if accept:
+                requester = conn.execute("SELECT * FROM users WHERE id = ?", (request["requester_id"],)).fetchone()
+                target = conn.execute("SELECT * FROM users WHERE id = ?", (request["target_id"],)).fetchone()
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO circle_members(circle_id, member_user_id, joined_at)
+                    VALUES(?, ?, ?)
+                    """,
+                    (target["circle_id"], requester["id"], now),
+                )
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO circle_members(circle_id, member_user_id, joined_at)
+                    VALUES(?, ?, ?)
+                    """,
+                    (requester["circle_id"], target["id"], now),
+                )
+            decided = self._friend_request_row(conn, request_id)
+        return row_to_friend_request(decided)
+
+    def _friend_request_row(self, conn: sqlite3.Connection, request_id: str) -> sqlite3.Row:
+        row = conn.execute(
+            """
+            SELECT
+                friend_requests.*,
+                requester.id AS requester_id,
+                requester.username AS requester_username,
+                requester.circle_id AS requester_circle_id,
+                target.id AS target_id,
+                target.username AS target_username,
+                target.circle_id AS target_circle_id
+            FROM friend_requests
+            JOIN users requester ON requester.id = friend_requests.requester_id
+            JOIN users target ON target.id = friend_requests.target_id
+            WHERE friend_requests.id = ?
+            """,
+            (request_id,),
+        ).fetchone()
+        if not row:
+            raise DatabaseError("friend request not found", 404)
+        return row
+
+    def list_friends(self, user_id: str) -> list[dict[str, Any]]:
+        return self.list_joined_circles(user_id)
+
+    def friend_public_ideas(self, user_id: str, circle_id: str, query: dict[str, list[str]]) -> dict[str, Any]:
+        circle_id = normalize_circle_id(circle_id)
+        return self.feed(user_id, {**query, "circleId": [circle_id]})
+
+    def remove_friend(self, user_id: str, circle_id: str) -> dict[str, Any]:
+        circle_id = normalize_circle_id(circle_id)
+        now = utc_now()
+        with self._lock, self.connect() as conn:
+            target = conn.execute("SELECT * FROM users WHERE circle_id = ?", (circle_id,)).fetchone()
+            user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+            if not target:
+                raise DatabaseError("friend not found", 404)
+            if target["id"] == user_id:
+                raise DatabaseError("cannot remove yourself")
+            conn.execute(
+                "DELETE FROM circle_members WHERE circle_id = ? AND member_user_id = ?",
+                (target["circle_id"], user_id),
+            )
+            conn.execute(
+                "DELETE FROM circle_members WHERE circle_id = ? AND member_user_id = ?",
+                (user["circle_id"], target["id"]),
+            )
+        return {"removed": True, "circleId": circle_id, "removedAt": now}
 
     def list_joined_circles(self, user_id: str) -> list[dict[str, Any]]:
         with self.connect() as conn:
@@ -887,19 +1048,16 @@ class TodoDatabase:
         ]
 
     def leave_circle(self, user_id: str, circle_id: str) -> dict[str, Any]:
-        circle_id = normalize_circle_id(circle_id)
-        with self._lock, self.connect() as conn:
-            conn.execute(
-                "DELETE FROM circle_members WHERE circle_id = ? AND member_user_id = ?",
-                (circle_id, user_id),
-            )
-        return {"left": True, "circleId": circle_id}
+        removed = self.remove_friend(user_id, circle_id)
+        return {"left": removed["removed"], "circleId": removed["circleId"]}
 
     def feed(self, user_id: str, query: dict[str, list[str]]) -> dict[str, Any]:
         circle_id = first(query.get("circleId"))
+        with self.connect() as conn:
+            user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
         if circle_id:
             circle_id = normalize_circle_id(circle_id)
-            if not self._is_circle_member(user_id, circle_id):
+            if circle_id != user["circle_id"] and not self._is_circle_member(user_id, circle_id):
                 raise DatabaseError("circle not joined", 403)
 
         page = max(1, parse_int(first(query.get("page")), 1))
@@ -909,9 +1067,9 @@ class TodoDatabase:
         where = [
             "tasks.visibility = 'circle'",
             "tasks.deleted_at IS NULL",
-            "circle_members.member_user_id = ?",
+            "(tasks.user_id = ? OR circle_members.member_user_id = ?)",
         ]
-        params: list[Any] = [user_id]
+        params: list[Any] = [user_id, user_id]
         if circle_id:
             where.append("users.circle_id = ?")
             params.append(circle_id)
@@ -923,10 +1081,12 @@ class TodoDatabase:
                 SELECT COUNT(*) AS total
                 FROM tasks
                 JOIN users ON users.id = tasks.user_id
-                JOIN circle_members ON circle_members.circle_id = users.circle_id
+                LEFT JOIN circle_members
+                  ON circle_members.circle_id = users.circle_id
+                 AND circle_members.member_user_id = ?
                 WHERE {where_sql}
                 """,
-                params,
+                [user_id, *params],
             ).fetchone()["total"]
             rows = conn.execute(
                 f"""
@@ -950,12 +1110,14 @@ class TodoDatabase:
                     ) AS liked_by_me
                 FROM tasks
                 JOIN users ON users.id = tasks.user_id
-                JOIN circle_members ON circle_members.circle_id = users.circle_id
+                LEFT JOIN circle_members
+                  ON circle_members.circle_id = users.circle_id
+                 AND circle_members.member_user_id = ?
                 WHERE {where_sql}
                 ORDER BY tasks.updated_at DESC
                 LIMIT ? OFFSET ?
                 """,
-                [user_id, *params, page_size, offset],
+                [user_id, user_id, *params, page_size, offset],
             ).fetchall()
         return {
             "items": [self._feed_item(row) for row in rows],
@@ -1090,15 +1252,24 @@ class TodoDatabase:
             "likedByMe": bool(counts["liked_by_me"]),
         }
 
-    def _require_viewable_idea(self, user_id: str, idea_id: str) -> sqlite3.Row:
-        with self.connect() as conn:
+    def _require_viewable_idea(
+        self,
+        user_id: str,
+        idea_id: str,
+        conn: sqlite3.Connection | None = None,
+        include_deleted: bool = False,
+    ) -> sqlite3.Row:
+        owns_connection = conn is None
+        conn = conn or self.connect()
+        try:
+            deleted_filter = "" if include_deleted else "AND tasks.deleted_at IS NULL"
             row = conn.execute(
-                """
+                f"""
                 SELECT tasks.*, users.circle_id AS author_circle_id
                 FROM tasks
                 JOIN users ON users.id = tasks.user_id
                 WHERE tasks.id = ?
-                  AND tasks.deleted_at IS NULL
+                  {deleted_filter}
                 """,
                 (idea_id,),
             ).fetchone()
@@ -1108,7 +1279,41 @@ class TodoDatabase:
                 return row
             if row["visibility"] == "circle" and self._is_circle_member(user_id, row["author_circle_id"], conn):
                 return row
-        raise DatabaseError("idea not visible", 403)
+            raise DatabaseError("idea not visible", 403)
+        finally:
+            if owns_connection:
+                conn.close()
+
+    def _idea_detail(self, conn: sqlite3.Connection, user_id: str, idea_id: str) -> dict[str, Any]:
+        row = conn.execute(
+            """
+            SELECT
+                tasks.*,
+                users.id AS author_id,
+                users.username AS author_username,
+                users.circle_id AS author_circle_id,
+                (SELECT COUNT(*) FROM idea_likes WHERE idea_likes.idea_id = tasks.id) AS like_count,
+                (
+                    SELECT COUNT(*)
+                    FROM idea_comments
+                    WHERE idea_comments.idea_id = tasks.id
+                      AND idea_comments.deleted_at IS NULL
+                ) AS comment_count,
+                EXISTS(
+                    SELECT 1
+                    FROM idea_likes
+                    WHERE idea_likes.idea_id = tasks.id
+                      AND idea_likes.user_id = ?
+                ) AS liked_by_me
+            FROM tasks
+            JOIN users ON users.id = tasks.user_id
+            WHERE tasks.id = ?
+            """,
+            (user_id, idea_id),
+        ).fetchone()
+        if not row:
+            raise DatabaseError("idea not found", 404)
+        return self._feed_item(row)
 
     def _is_circle_member(
         self,

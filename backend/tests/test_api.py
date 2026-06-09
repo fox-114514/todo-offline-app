@@ -179,13 +179,36 @@ class TodoApiTest(unittest.TestCase):
         bob_client = ApiClient(f"http://{host}:{port}")
         self.register(bob_client, username="bob")
 
-        joined = bob_client.request(
+        request = bob_client.request(
             "POST",
-            "/api/circles/join",
-            {"circleId": alice["user"]["circleId"]},
+            "/api/friends/requests",
+            {"circleId": alice["user"]["circleId"], "introduction": "我是 bob，想互相看看公开 idea"},
         )
-        self.assertEqual(joined["code"], 200)
-        self.assertEqual(joined["data"]["owner"]["username"], "alice")
+        self.assertEqual(request["code"], 200)
+        self.assertEqual(request["data"]["status"], "pending")
+
+        duplicate = bob_client.request(
+            "POST",
+            "/api/friends/requests",
+            {"circleId": alice["user"]["circleId"], "introduction": "重复申请"},
+        )
+        self.assertEqual(duplicate["code"], 409)
+
+        incoming = self.client.request("GET", "/api/friends/requests/incoming")
+        self.assertEqual(incoming["code"], 200)
+        self.assertEqual(incoming["data"]["items"][0]["requester"]["username"], "bob")
+
+        accepted = self.client.request(
+            "POST",
+            f"/api/friends/requests/{request['data']['id']}/accept",
+        )
+        self.assertEqual(accepted["code"], 200)
+        self.assertEqual(accepted["data"]["status"], "accepted")
+
+        alice_friends = self.client.request("GET", "/api/friends")
+        bob_friends = bob_client.request("GET", "/api/friends")
+        self.assertEqual(alice_friends["data"]["items"][0]["owner"]["username"], "bob")
+        self.assertEqual(bob_friends["data"]["items"][0]["owner"]["username"], "alice")
 
         private_idea = self.client.request(
             "POST",
@@ -222,7 +245,15 @@ class TodoApiTest(unittest.TestCase):
         self.assertNotIn("私密 idea", titles)
         self.assertEqual(feed["data"]["items"][0]["author"]["username"], "alice")
 
+        own_feed = self.client.request("GET", "/api/feed")
+        own_titles = [item["title"] for item in own_feed["data"]["items"]]
+        self.assertIn("公开 idea", own_titles)
+
         idea_id = public_idea["data"]["id"]
+        detail = bob_client.request("GET", f"/api/ideas/{idea_id}")
+        self.assertEqual(detail["code"], 200)
+        self.assertEqual(detail["data"]["author"]["username"], "alice")
+
         liked = bob_client.request("POST", f"/api/ideas/{idea_id}/like")
         self.assertEqual(liked["data"]["likeCount"], 1)
         self.assertTrue(liked["data"]["likedByMe"])
@@ -241,6 +272,11 @@ class TodoApiTest(unittest.TestCase):
 
         unliked = bob_client.request("DELETE", f"/api/ideas/{idea_id}/like")
         self.assertEqual(unliked["data"]["likeCount"], 0)
+
+        removed = self.client.request("DELETE", f"/api/friends/{alice_friends['data']['items'][0]['circleId']}")
+        self.assertEqual(removed["code"], 200)
+        hidden = bob_client.request("GET", f"/api/ideas/{idea_id}")
+        self.assertEqual(hidden["code"], 403)
 
     def test_migrates_v1_database_before_visibility_index(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -322,6 +358,106 @@ class TodoApiTest(unittest.TestCase):
             self.assertIn("idx_tasks_visibility", indexes)
             self.assertTrue(circle_id.startswith("ID-"))
             self.assertEqual(visibility, "private")
+
+    def test_migrates_old_single_direction_circle_members_to_friends(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "old-friends.sqlite3"
+            with sqlite3.connect(db_path) as conn:
+                conn.executescript(
+                    """
+                    CREATE TABLE users (
+                        id TEXT PRIMARY KEY,
+                        username TEXT NOT NULL UNIQUE,
+                        email TEXT NOT NULL UNIQUE,
+                        circle_id TEXT,
+                        password_salt TEXT NOT NULL,
+                        password_hash TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+
+                    CREATE TABLE circle_members (
+                        circle_id TEXT NOT NULL,
+                        member_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        joined_at TEXT NOT NULL,
+                        PRIMARY KEY(circle_id, member_user_id)
+                    );
+
+                    CREATE TABLE tasks (
+                        id TEXT PRIMARY KEY,
+                        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        title TEXT NOT NULL,
+                        content TEXT NOT NULL DEFAULT '',
+                        status TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        priority TEXT NOT NULL,
+                        visibility TEXT NOT NULL DEFAULT 'private',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL,
+                        deleted_at TEXT,
+                        sync_seq INTEGER NOT NULL
+                    );
+
+                    CREATE TABLE reminder_settings (
+                        user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                        enabled INTEGER NOT NULL,
+                        frequency_seconds INTEGER NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        sync_seq INTEGER NOT NULL
+                    );
+
+                    CREATE TABLE processed_operations (
+                        operation_id TEXT PRIMARY KEY,
+                        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        task_id TEXT,
+                        operation_type TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    );
+
+                    CREATE TABLE sync_meta (
+                        key TEXT PRIMARY KEY,
+                        value INTEGER NOT NULL
+                    );
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO users(id, username, email, circle_id, password_salt, password_hash, created_at, updated_at)
+                    VALUES('alice-id', 'alice', 'alice@example.com', 'ID-ALICE123', 'salt', 'hash', '2026-06-08T12:00:00Z', '2026-06-08T12:00:00Z')
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO users(id, username, email, circle_id, password_salt, password_hash, created_at, updated_at)
+                    VALUES('bob-id', 'bob', 'bob@example.com', 'ID-BOB12345', 'salt', 'hash', '2026-06-08T12:00:00Z', '2026-06-08T12:00:00Z')
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO circle_members(circle_id, member_user_id, joined_at)
+                    VALUES('ID-ALICE123', 'bob-id', '2026-06-08T12:00:00Z')
+                    """
+                )
+
+            TodoDatabase(db_path)
+
+            with sqlite3.connect(db_path) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT circle_id, member_user_id
+                    FROM circle_members
+                    ORDER BY circle_id, member_user_id
+                    """
+                ).fetchall()
+
+            self.assertEqual(
+                rows,
+                [
+                    ("ID-ALICE123", "bob-id"),
+                    ("ID-BOB12345", "alice-id"),
+                ],
+            )
 
 
 if __name__ == "__main__":

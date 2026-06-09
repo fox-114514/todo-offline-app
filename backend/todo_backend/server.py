@@ -97,12 +97,43 @@ class TodoRequestHandler(BaseHTTPRequestHandler):
         if method == "GET" and path == "/api/me/circle":
             return self.db.get_my_circle(user["id"])
 
+        if method == "POST" and path == "/api/friends/requests":
+            body = self._read_json()
+            return self.db.create_friend_request(
+                user["id"],
+                body.get("circleId", ""),
+                body.get("introduction", ""),
+            )
+
+        if method == "GET" and path == "/api/friends/requests/incoming":
+            return {"items": self.db.list_friend_requests(user["id"], "incoming")}
+
+        if method == "GET" and path == "/api/friends/requests/outgoing":
+            return {"items": self.db.list_friend_requests(user["id"], "outgoing")}
+
+        friend_request_decision_match = re.fullmatch(r"/api/friends/requests/([^/]+)/(accept|reject)", path)
+        if friend_request_decision_match and method == "POST":
+            request_id = friend_request_decision_match.group(1)
+            decision = friend_request_decision_match.group(2)
+            return self.db.decide_friend_request(user["id"], request_id, accept=decision == "accept")
+
+        if method == "GET" and path == "/api/friends":
+            return {"items": self.db.list_friends(user["id"])}
+
+        friend_ideas_match = re.fullmatch(r"/api/friends/([^/]+)/ideas", path)
+        if friend_ideas_match and method == "GET":
+            return self.db.friend_public_ideas(user["id"], friend_ideas_match.group(1), query)
+
+        friend_match = re.fullmatch(r"/api/friends/([^/]+)", path)
+        if friend_match and method == "DELETE":
+            return self.db.remove_friend(user["id"], friend_match.group(1))
+
         if method == "POST" and path == "/api/circles/join":
             body = self._read_json()
             return self.db.join_circle(user["id"], body.get("circleId", ""))
 
         if method == "GET" and path == "/api/circles/joined":
-            return {"items": self.db.list_joined_circles(user["id"])}
+            return {"items": self.db.list_friends(user["id"])}
 
         circle_leave_match = re.fullmatch(r"/api/circles/([^/]+)/leave", path)
         if circle_leave_match and method == "DELETE":

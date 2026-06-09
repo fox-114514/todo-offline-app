@@ -1,8 +1,13 @@
 package com.example.todooffline
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
+import androidx.compose.foundation.clickable
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -63,7 +68,9 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.todooffline.data.CATEGORY_OTHER
+import com.example.todooffline.data.CircleInfo
 import com.example.todooffline.data.FeedIdea
+import com.example.todooffline.data.FriendRequest
 import com.example.todooffline.data.IdeaComment
 import com.example.todooffline.data.PRIORITY_MEDIUM
 import com.example.todooffline.data.STATUS_TODO
@@ -211,7 +218,12 @@ private fun MainScreen(state: TodoUiState, viewModel: TodoViewModel) {
             if (state.offline) OfflineBanner()
             MainTabs(state, viewModel)
             if (state.tab == MainTab.IDEAS) {
-                IdeaListPanel(state, viewModel, onEdit = { editorTask = it })
+                IdeaListPanel(
+                    state,
+                    viewModel,
+                    onEdit = { editorTask = it },
+                    onOpen = viewModel::openLocalIdeaDetail,
+                )
             } else {
                 FeedPanel(state, viewModel)
             }
@@ -238,11 +250,12 @@ private fun MainScreen(state: TodoUiState, viewModel: TodoViewModel) {
             },
         )
     }
-    state.selectedCommentIdea?.let { idea ->
-        CommentsDialog(
+    state.selectedIdea?.let { idea ->
+        IdeaDetailDialog(
             idea = idea,
             comments = state.comments,
-            onDismiss = viewModel::closeComments,
+            onDismiss = viewModel::closeIdeaDetail,
+            onLike = { viewModel.toggleLike(idea) },
             onSend = viewModel::createComment,
         )
     }
@@ -298,7 +311,12 @@ private fun OfflineBanner() {
 }
 
 @Composable
-private fun IdeaListPanel(state: TodoUiState, viewModel: TodoViewModel, onEdit: (TodoTask) -> Unit) {
+private fun IdeaListPanel(
+    state: TodoUiState,
+    viewModel: TodoViewModel,
+    onEdit: (TodoTask) -> Unit,
+    onOpen: (TodoTask) -> Unit,
+) {
     SearchAndFilters(state, viewModel)
     if (state.tasks.isEmpty()) {
         EmptyState("还没有 idea")
@@ -308,7 +326,12 @@ private fun IdeaListPanel(state: TodoUiState, viewModel: TodoViewModel, onEdit: 
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             items(state.tasks, key = { it.id }) { task ->
-                IdeaCard(task, onEdit = { onEdit(task) }, onDelete = { viewModel.deleteTask(task) })
+                IdeaCard(
+                    task,
+                    onOpen = { onOpen(task) },
+                    onEdit = { onEdit(task) },
+                    onDelete = { viewModel.deleteTask(task) },
+                )
             }
         }
     }
@@ -351,14 +374,16 @@ private fun EmptyState(text: String) {
 }
 
 @Composable
-private fun IdeaCard(task: TodoTask, onEdit: () -> Unit, onDelete: () -> Unit) {
+private fun IdeaCard(task: TodoTask, onOpen: () -> Unit, onEdit: () -> Unit, onDelete: () -> Unit) {
     val priorityColor = when (task.priority) {
         "高" -> Color(0xFFDC2626)
         "低" -> Color(0xFF64748B)
         else -> Color(0xFF2563EB)
     }
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onOpen),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
     ) {
         Column(Modifier.padding(14.dp)) {
@@ -392,24 +417,53 @@ private fun IdeaCard(task: TodoTask, onEdit: () -> Unit, onDelete: () -> Unit) {
 @Composable
 private fun FeedPanel(state: TodoUiState, viewModel: TodoViewModel) {
     var joinId by remember { mutableStateOf("") }
+    var introduction by remember { mutableStateOf("") }
+    val context = LocalContext.current
     Column(Modifier.fillMaxSize()) {
         Card(Modifier.padding(horizontal = 16.dp, vertical = 8.dp).fillMaxWidth()) {
             Column(Modifier.padding(12.dp)) {
                 Text("我的好友圈 ID", style = MaterialTheme.typography.labelMedium)
-                Text(state.circleId.ifBlank { "加载中" }, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(10.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedTextField(
-                        value = joinId,
-                        onValueChange = { joinId = it.uppercase() },
-                        label = { Text("输入别人的好友圈 ID") },
+                    Text(
+                        state.circleId.ifBlank { "加载中" },
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.weight(1f),
-                        singleLine = true,
                     )
-                    Spacer(Modifier.width(8.dp))
-                    Button(onClick = { viewModel.joinCircle(joinId); joinId = "" }) {
-                        Text("加入")
+                    OutlinedButton(
+                        onClick = { copyCircleId(context, state.circleId) },
+                        enabled = state.circleId.isNotBlank(),
+                    ) {
+                        Text("复制")
                     }
+                }
+                Spacer(Modifier.height(10.dp))
+                OutlinedTextField(
+                    value = joinId,
+                    onValueChange = { joinId = it.uppercase() },
+                    label = { Text("输入好友 ID") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = introduction,
+                    onValueChange = { introduction = it.take(500) },
+                    label = { Text("介绍一下你是谁") },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2,
+                )
+                Spacer(Modifier.height(8.dp))
+                Button(
+                    onClick = {
+                        viewModel.sendFriendRequest(joinId, introduction)
+                        joinId = ""
+                        introduction = ""
+                    },
+                    enabled = joinId.isNotBlank() && introduction.isNotBlank(),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("发送好友申请")
                 }
                 state.socialError?.let {
                     Spacer(Modifier.height(6.dp))
@@ -417,9 +471,11 @@ private fun FeedPanel(state: TodoUiState, viewModel: TodoViewModel) {
                 }
             }
         }
+        FriendRequestsSection(state, viewModel)
+        FriendsSection(state, viewModel)
         FeedFilters(state, viewModel)
         if (state.feed.isEmpty()) {
-            EmptyState("加入好友圈后，就能刷到他们公开的 idea")
+            EmptyState("添加好友后，就能刷到彼此公开的 idea")
         } else {
             LazyColumn(
                 contentPadding = PaddingValues(16.dp),
@@ -428,11 +484,94 @@ private fun FeedPanel(state: TodoUiState, viewModel: TodoViewModel) {
                 items(state.feed, key = { it.task.id }) { item ->
                     FeedCard(
                         idea = item,
+                        onOpen = { viewModel.openIdeaDetail(item) },
                         onLike = { viewModel.toggleLike(item) },
-                        onComments = { viewModel.openComments(item) },
+                        onComments = { viewModel.openIdeaDetail(item) },
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun FriendRequestsSection(state: TodoUiState, viewModel: TodoViewModel) {
+    val pendingIncoming = state.incomingFriendRequests.filter { it.status == "pending" }
+    val recentOutgoing = state.outgoingFriendRequests.take(3)
+    if (pendingIncoming.isEmpty() && recentOutgoing.isEmpty()) return
+
+    Column(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+        if (pendingIncoming.isNotEmpty()) {
+            Text("收到的好友申请", style = MaterialTheme.typography.labelMedium)
+            pendingIncoming.forEach { request ->
+                FriendRequestRow(
+                    request = request,
+                    incoming = true,
+                    onAccept = { viewModel.acceptFriendRequest(request.id) },
+                    onReject = { viewModel.rejectFriendRequest(request.id) },
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+        }
+        if (recentOutgoing.isNotEmpty()) {
+            Text("发出的申请", style = MaterialTheme.typography.labelMedium)
+            recentOutgoing.forEach { request ->
+                FriendRequestRow(request = request, incoming = false, onAccept = {}, onReject = {})
+            }
+        }
+    }
+}
+
+@Composable
+private fun FriendRequestRow(
+    request: FriendRequest,
+    incoming: Boolean,
+    onAccept: () -> Unit,
+    onReject: () -> Unit,
+) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        val user = if (incoming) request.requester else request.target
+        Text("${user.username} (${request.status})", fontWeight = FontWeight.SemiBold)
+        Text(request.introduction, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (incoming) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = onReject) { Text("拒绝") }
+                Button(onClick = onAccept) { Text("通过") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FriendsSection(state: TodoUiState, viewModel: TodoViewModel) {
+    if (state.friends.isEmpty()) return
+    Column(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+        Text("好友管理", style = MaterialTheme.typography.labelMedium)
+        state.friends.forEach { friend ->
+            FriendRow(
+                friend = friend,
+                onOpen = { viewModel.selectFeedCircle(friend.circleId) },
+                onRemove = { viewModel.removeFriend(friend.circleId) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun FriendRow(friend: CircleInfo, onOpen: () -> Unit, onRemove: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onOpen)
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(friend.owner.username, fontWeight = FontWeight.SemiBold)
+            Text(friend.circleId, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        OutlinedButton(onClick = onRemove) {
+            Text("删除")
         }
     }
 }
@@ -450,7 +589,14 @@ private fun FeedFilters(state: TodoUiState, viewModel: TodoViewModel) {
             onClick = { viewModel.selectFeedCircle(null) },
             label = { Text("全部好友圈") },
         )
-        state.joinedCircles.forEach { circle ->
+        if (state.circleId.isNotBlank()) {
+            FilterChip(
+                selected = state.selectedFeedCircleId == state.circleId,
+                onClick = { viewModel.selectFeedCircle(state.circleId) },
+                label = { Text("我的公开") },
+            )
+        }
+        state.friends.forEach { circle ->
             FilterChip(
                 selected = state.selectedFeedCircleId == circle.circleId,
                 onClick = { viewModel.selectFeedCircle(circle.circleId) },
@@ -461,9 +607,11 @@ private fun FeedFilters(state: TodoUiState, viewModel: TodoViewModel) {
 }
 
 @Composable
-private fun FeedCard(idea: FeedIdea, onLike: () -> Unit, onComments: () -> Unit) {
+private fun FeedCard(idea: FeedIdea, onOpen: () -> Unit, onLike: () -> Unit, onComments: () -> Unit) {
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onOpen),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
     ) {
         Column(Modifier.padding(14.dp)) {
@@ -552,10 +700,11 @@ private fun OptionRow(title: String, values: List<Pair<String, String>>, selecte
 }
 
 @Composable
-private fun CommentsDialog(
+private fun IdeaDetailDialog(
     idea: FeedIdea,
     comments: List<IdeaComment>,
     onDismiss: () -> Unit,
+    onLike: () -> Unit,
     onSend: (String) -> Unit,
 ) {
     var content by remember(idea.task.id) { mutableStateOf("") }
@@ -569,13 +718,33 @@ private fun CommentsDialog(
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("关闭") }
         },
-        title = { Text("评论：${idea.task.title}") },
+        title = { Text(idea.task.title) },
         text = {
             Column {
+                Text("${idea.author.username} 的 idea", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                if (idea.task.content.isNotBlank()) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(idea.task.content, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    LabelChip(idea.task.category)
+                    LabelChip(idea.task.status)
+                    LabelChip(idea.task.priority)
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = onLike) {
+                        Text(if (idea.likedByMe) "已赞 ${idea.likeCount}" else "点赞 ${idea.likeCount}")
+                    }
+                    Text("评论 ${idea.commentCount}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Spacer(Modifier.height(12.dp))
+                Text("全部评论", style = MaterialTheme.typography.labelMedium)
                 if (comments.isEmpty()) {
                     Text("还没有评论", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 } else {
-                    comments.takeLast(8).forEach { comment ->
+                    comments.forEach { comment ->
                         Text("${comment.author.username}：${comment.content}", modifier = Modifier.padding(vertical = 4.dp))
                     }
                 }
@@ -597,6 +766,7 @@ private fun SettingsDialog(state: TodoUiState, viewModel: TodoViewModel, onDismi
     var reminderEnabled by remember(state.reminder) { mutableStateOf(state.reminder.enabled) }
     var frequency by remember(state.reminder) { mutableStateOf(state.reminder.frequencySeconds.toString()) }
     var baseUrl by remember(state.baseUrl) { mutableStateOf(state.baseUrl) }
+    val context = LocalContext.current
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -622,7 +792,18 @@ private fun SettingsDialog(state: TodoUiState, viewModel: TodoViewModel, onDismi
         text = {
             Column {
                 Text("账号：${state.username}")
-                Text("我的好友圈 ID：${state.circleId.ifBlank { "加载中" }}")
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "好友圈 ID：${state.circleId.ifBlank { "加载中" }}",
+                        modifier = Modifier.weight(1f),
+                    )
+                    OutlinedButton(
+                        onClick = { copyCircleId(context, state.circleId) },
+                        enabled = state.circleId.isNotBlank(),
+                    ) {
+                        Text("复制")
+                    }
+                }
                 Text("同步：${state.syncMessage}")
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(baseUrl, { baseUrl = it }, label = { Text("后端地址") }, modifier = Modifier.fillMaxWidth())
@@ -644,4 +825,11 @@ private fun SettingsDialog(state: TodoUiState, viewModel: TodoViewModel, onDismi
             }
         },
     )
+}
+
+private fun copyCircleId(context: Context, circleId: String) {
+    if (circleId.isBlank()) return
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    clipboard.setPrimaryClip(ClipData.newPlainText("Idea Board 好友圈 ID", circleId))
+    Toast.makeText(context, "已复制好友圈 ID", Toast.LENGTH_SHORT).show()
 }

@@ -79,6 +79,16 @@ data class CircleInfo(
     val memberCount: Int? = null,
 )
 
+data class FriendRequest(
+    val id: String,
+    val requester: PublicUser,
+    val target: PublicUser,
+    val introduction: String,
+    val status: String,
+    val createdAt: String,
+    val decidedAt: String? = null,
+)
+
 data class FeedIdea(
     val task: TodoTask,
     val author: PublicUser,
