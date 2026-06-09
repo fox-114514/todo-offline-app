@@ -87,6 +87,12 @@ import com.example.todooffline.ui.TodoUiState
 import com.example.todooffline.ui.TodoViewModel
 import com.example.todooffline.ui.TodoViewModelFactory
 
+private enum class SocialPage {
+    FEED,
+    ADD_FRIEND,
+    FRIENDS,
+}
+
 class MainActivity : ComponentActivity() {
     private val notificationPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -416,63 +422,53 @@ private fun IdeaCard(task: TodoTask, onOpen: () -> Unit, onEdit: () -> Unit, onD
 
 @Composable
 private fun FeedPanel(state: TodoUiState, viewModel: TodoViewModel) {
-    var joinId by remember { mutableStateOf("") }
-    var introduction by remember { mutableStateOf("") }
-    val context = LocalContext.current
+    var page by remember { mutableStateOf(SocialPage.FEED) }
+    when (page) {
+        SocialPage.FEED -> FeedHomePanel(
+            state = state,
+            viewModel = viewModel,
+            onAddFriend = { page = SocialPage.ADD_FRIEND },
+            onManageFriends = { page = SocialPage.FRIENDS },
+        )
+        SocialPage.ADD_FRIEND -> AddFriendPage(
+            state = state,
+            viewModel = viewModel,
+            onBack = { page = SocialPage.FEED },
+        )
+        SocialPage.FRIENDS -> FriendManagementPage(
+            state = state,
+            viewModel = viewModel,
+            onBack = { page = SocialPage.FEED },
+        )
+    }
+}
+
+@Composable
+private fun FeedHomePanel(
+    state: TodoUiState,
+    viewModel: TodoViewModel,
+    onAddFriend: () -> Unit,
+    onManageFriends: () -> Unit,
+) {
     Column(Modifier.fillMaxSize()) {
-        Card(Modifier.padding(horizontal = 16.dp, vertical = 8.dp).fillMaxWidth()) {
-            Column(Modifier.padding(12.dp)) {
-                Text("我的好友圈 ID", style = MaterialTheme.typography.labelMedium)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        state.circleId.ifBlank { "加载中" },
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.weight(1f),
-                    )
-                    OutlinedButton(
-                        onClick = { copyCircleId(context, state.circleId) },
-                        enabled = state.circleId.isNotBlank(),
-                    ) {
-                        Text("复制")
-                    }
-                }
-                Spacer(Modifier.height(10.dp))
-                OutlinedTextField(
-                    value = joinId,
-                    onValueChange = { joinId = it.uppercase() },
-                    label = { Text("输入好友 ID") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                )
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = introduction,
-                    onValueChange = { introduction = it.take(500) },
-                    label = { Text("介绍一下你是谁") },
-                    modifier = Modifier.fillMaxWidth(),
-                    minLines = 2,
-                )
-                Spacer(Modifier.height(8.dp))
-                Button(
-                    onClick = {
-                        viewModel.sendFriendRequest(joinId, introduction)
-                        joinId = ""
-                        introduction = ""
-                    },
-                    enabled = joinId.isNotBlank() && introduction.isNotBlank(),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text("发送好友申请")
-                }
-                state.socialError?.let {
-                    Spacer(Modifier.height(6.dp))
-                    Text(it, color = MaterialTheme.colorScheme.error)
-                }
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Button(onClick = onAddFriend, modifier = Modifier.weight(1f)) {
+                Text("添加好友")
+            }
+            OutlinedButton(onClick = onManageFriends, modifier = Modifier.weight(1f)) {
+                Text("好友管理")
             }
         }
-        FriendRequestsSection(state, viewModel)
-        FriendsSection(state, viewModel)
+        state.socialError?.let {
+            Text(
+                it,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(horizontal = 16.dp),
+            )
+        }
         FeedFilters(state, viewModel)
         if (state.feed.isEmpty()) {
             EmptyState("添加好友后，就能刷到彼此公开的 idea")
@@ -491,6 +487,127 @@ private fun FeedPanel(state: TodoUiState, viewModel: TodoViewModel) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun AddFriendPage(state: TodoUiState, viewModel: TodoViewModel, onBack: () -> Unit) {
+    var joinId by remember { mutableStateOf("") }
+    var introduction by remember { mutableStateOf("") }
+    val context = LocalContext.current
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        item {
+            ChildPageHeader("添加好友", onBack)
+        }
+        item {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp)) {
+                    Text("我的好友 ID", style = MaterialTheme.typography.labelMedium)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            state.circleId.ifBlank { "加载中" },
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.weight(1f),
+                        )
+                        OutlinedButton(
+                            onClick = { copyCircleId(context, state.circleId) },
+                            enabled = state.circleId.isNotBlank(),
+                        ) {
+                            Text("复制")
+                        }
+                    }
+                }
+            }
+        }
+        item {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp)) {
+                    OutlinedTextField(
+                        value = joinId,
+                        onValueChange = { joinId = it.uppercase() },
+                        label = { Text("输入好友 ID") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = introduction,
+                        onValueChange = { introduction = it.take(500) },
+                        label = { Text("介绍一下你是谁") },
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 3,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            viewModel.sendFriendRequest(joinId, introduction)
+                            joinId = ""
+                            introduction = ""
+                        },
+                        enabled = joinId.isNotBlank() && introduction.isNotBlank(),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("发送好友申请")
+                    }
+                    state.socialError?.let {
+                        Spacer(Modifier.height(6.dp))
+                        Text(it, color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            }
+        }
+        item {
+            FriendRequestsSection(state, viewModel)
+        }
+    }
+}
+
+@Composable
+private fun FriendManagementPage(state: TodoUiState, viewModel: TodoViewModel, onBack: () -> Unit) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        item {
+            ChildPageHeader("好友管理", onBack)
+        }
+        if (state.friends.isEmpty()) {
+            item {
+                Text("还没有好友", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        } else {
+            items(state.friends, key = { it.circleId }) { friend ->
+                FriendRow(
+                    friend = friend,
+                    onOpen = {
+                        viewModel.selectFeedCircle(friend.circleId)
+                        onBack()
+                    },
+                    onRemove = { viewModel.removeFriend(friend.circleId) },
+                )
+            }
+        }
+        state.socialError?.let { error ->
+            item {
+                Text(error, color = MaterialTheme.colorScheme.error)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChildPageHeader(title: String, onBack: () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        TextButton(onClick = onBack) {
+            Text("返回")
+        }
+        Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
     }
 }
 
@@ -538,21 +655,6 @@ private fun FriendRequestRow(
                 OutlinedButton(onClick = onReject) { Text("拒绝") }
                 Button(onClick = onAccept) { Text("通过") }
             }
-        }
-    }
-}
-
-@Composable
-private fun FriendsSection(state: TodoUiState, viewModel: TodoViewModel) {
-    if (state.friends.isEmpty()) return
-    Column(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
-        Text("好友管理", style = MaterialTheme.typography.labelMedium)
-        state.friends.forEach { friend ->
-            FriendRow(
-                friend = friend,
-                onOpen = { viewModel.selectFeedCircle(friend.circleId) },
-                onRemove = { viewModel.removeFriend(friend.circleId) },
-            )
         }
     }
 }

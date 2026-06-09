@@ -68,6 +68,7 @@ class TodoViewModel(
     private val repository: TodoRepository,
 ) : ViewModel() {
     private val _state = MutableStateFlow(TodoUiState(baseUrl = repository.baseUrl()))
+    private val feedCache = mutableMapOf<String?, List<FeedIdea>>()
     val state: StateFlow<TodoUiState> = _state
 
     init {
@@ -243,20 +244,24 @@ class TodoViewModel(
     fun loadSocial() {
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
+                val selectedCircleId = _state.value.selectedFeedCircleId
                 val myCircle = repository.myCircle()
                 val friends = repository.friends()
                 val incoming = repository.incomingFriendRequests()
                 val outgoing = repository.outgoingFriendRequests()
-                val feed = repository.feed(_state.value.selectedFeedCircleId)
-                SocialSnapshot(myCircle, friends, incoming, outgoing, feed)
+                val feed = repository.feed(selectedCircleId)
+                selectedCircleId to SocialSnapshot(myCircle, friends, incoming, outgoing, feed)
             }.onSuccess { snapshot ->
+                val selectedCircleId = snapshot.first
+                val social = snapshot.second
+                feedCache[selectedCircleId] = social.feed
                 _state.update {
                     it.copy(
-                        circleId = snapshot.myCircle.circleId,
-                        friends = snapshot.friends,
-                        incomingFriendRequests = snapshot.incoming,
-                        outgoingFriendRequests = snapshot.outgoing,
-                        feed = snapshot.feed,
+                        circleId = social.myCircle.circleId,
+                        friends = social.friends,
+                        incomingFriendRequests = social.incoming,
+                        outgoingFriendRequests = social.outgoing,
+                        feed = if (it.selectedFeedCircleId == selectedCircleId) social.feed else it.feed,
                         socialError = null,
                     )
                 }
@@ -297,6 +302,7 @@ class TodoViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { repository.removeFriend(circleId) }
                 .onSuccess {
+                    feedCache.clear()
                     _state.update {
                         it.copy(selectedFeedCircleId = null)
                     }
@@ -307,14 +313,37 @@ class TodoViewModel(
     }
 
     fun selectFeedCircle(circleId: String?) {
-        _state.update { it.copy(selectedFeedCircleId = circleId) }
-        loadSocial()
+        _state.update {
+            it.copy(
+                selectedFeedCircleId = circleId,
+                feed = feedCache[circleId] ?: emptyList(),
+            )
+        }
+        loadFeed(circleId)
+    }
+
+    fun loadFeed(circleId: String? = _state.value.selectedFeedCircleId) {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { repository.feed(circleId) }
+                .onSuccess { feed ->
+                    feedCache[circleId] = feed
+                    _state.update {
+                        if (it.selectedFeedCircleId == circleId) {
+                            it.copy(feed = feed, socialError = null)
+                        } else {
+                            it
+                        }
+                    }
+                }
+                .onFailure { error -> _state.update { it.copy(socialError = error.message ?: "好友圈加载失败") } }
+        }
     }
 
     fun toggleLike(idea: FeedIdea) {
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { repository.setIdeaLiked(idea, !idea.likedByMe) }
                 .onSuccess { updated ->
+                    updateCachedIdea(updated)
                     _state.update { state ->
                         state.copy(
                             feed = state.feed.map { if (it.task.id == updated.task.id) updated else it },
@@ -355,6 +384,10 @@ class TodoViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { repository.createComment(idea.task.id, content) }
                 .onSuccess { comment ->
+                    val updatedSelected = _state.value.selectedIdea?.let {
+                        if (it.task.id == idea.task.id) it.copy(commentCount = it.commentCount + 1) else it
+                    }
+                    updatedSelected?.let { updateCachedIdea(it) }
                     _state.update { state ->
                         state.copy(
                             comments = state.comments + comment,
@@ -369,6 +402,14 @@ class TodoViewModel(
                     }
                 }
                 .onFailure { error -> _state.update { it.copy(socialError = error.message ?: "评论失败") } }
+        }
+    }
+
+    private fun updateCachedIdea(idea: FeedIdea) {
+        feedCache.keys.toList().forEach { key ->
+            feedCache[key] = feedCache[key]?.map {
+                if (it.task.id == idea.task.id) idea else it
+            } ?: emptyList()
         }
     }
 

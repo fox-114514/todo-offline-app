@@ -13,3 +13,7 @@ android/local.properties
 
 .env
 .DS_Store
+
+# Local planning notes, kept outside version control.
+docs/requirements.md
+docs/pending-*.md
