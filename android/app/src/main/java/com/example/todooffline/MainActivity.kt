@@ -29,6 +29,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
@@ -42,6 +43,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -207,7 +209,7 @@ private fun MainScreen(state: TodoUiState, viewModel: TodoViewModel) {
             )
         },
         floatingActionButton = {
-            if (state.tab == MainTab.IDEAS) {
+            if (state.tab == MainTab.IDEAS && state.selectedIdea == null) {
                 ExtendedFloatingActionButton(
                     onClick = { creating = true },
                     icon = { Icon(Icons.Default.Add, contentDescription = null) },
@@ -222,16 +224,27 @@ private fun MainScreen(state: TodoUiState, viewModel: TodoViewModel) {
                 .fillMaxSize(),
         ) {
             if (state.offline) OfflineBanner()
-            MainTabs(state, viewModel)
-            if (state.tab == MainTab.IDEAS) {
-                IdeaListPanel(
-                    state,
-                    viewModel,
-                    onEdit = { editorTask = it },
-                    onOpen = viewModel::openLocalIdeaDetail,
+            val selectedIdea = state.selectedIdea
+            if (selectedIdea != null) {
+                IdeaDetailPage(
+                    idea = selectedIdea,
+                    comments = state.comments,
+                    onDismiss = viewModel::closeIdeaDetail,
+                    onLike = { viewModel.toggleLike(selectedIdea) },
+                    onSend = viewModel::createComment,
                 )
             } else {
-                FeedPanel(state, viewModel)
+                MainTabs(state, viewModel)
+                if (state.tab == MainTab.IDEAS) {
+                    IdeaListPanel(
+                        state,
+                        viewModel,
+                        onEdit = { editorTask = it },
+                        onOpen = viewModel::openLocalIdeaDetail,
+                    )
+                } else {
+                    FeedPanel(state, viewModel)
+                }
             }
         }
     }
@@ -256,15 +269,6 @@ private fun MainScreen(state: TodoUiState, viewModel: TodoViewModel) {
             },
         )
     }
-    state.selectedIdea?.let { idea ->
-        IdeaDetailDialog(
-            idea = idea,
-            comments = state.comments,
-            onDismiss = viewModel::closeIdeaDetail,
-            onLike = { viewModel.toggleLike(idea) },
-            onSend = viewModel::createComment,
-        )
-    }
     if (settingsOpen) {
         SettingsDialog(state, viewModel, onDismiss = { settingsOpen = false })
     }
@@ -272,22 +276,46 @@ private fun MainScreen(state: TodoUiState, viewModel: TodoViewModel) {
 
 @Composable
 private fun MainTabs(state: TodoUiState, viewModel: TodoViewModel) {
-    Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Button(
+    Row(
+        Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        PrimaryTabChip(
+            text = "我的 Idea",
+            selected = state.tab == MainTab.IDEAS,
+            modifier = Modifier.weight(1f),
             onClick = { viewModel.setTab(MainTab.IDEAS) },
-            enabled = state.tab != MainTab.IDEAS,
+        )
+        PrimaryTabChip(
+            text = "好友圈",
+            selected = state.tab == MainTab.FEED,
             modifier = Modifier.weight(1f),
-        ) {
-            Text("我的 Idea")
-        }
-        Button(
             onClick = { viewModel.setTab(MainTab.FEED) },
-            enabled = state.tab != MainTab.FEED,
-            modifier = Modifier.weight(1f),
-        ) {
-            Text("好友圈")
-        }
+        )
     }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PrimaryTabChip(text: String, selected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    FilterChip(
+        selected = selected,
+        onClick = onClick,
+        label = {
+            Text(
+                text,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                modifier = Modifier.padding(vertical = 4.dp),
+            )
+        },
+        modifier = modifier,
+        colors = FilterChipDefaults.filterChipColors(
+            selectedContainerColor = MaterialTheme.colorScheme.primary,
+            selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
+            containerColor = MaterialTheme.colorScheme.surface,
+            labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        ),
+    )
 }
 
 @Composable
@@ -455,12 +483,8 @@ private fun FeedHomePanel(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Button(onClick = onAddFriend, modifier = Modifier.weight(1f)) {
-                Text("添加好友")
-            }
-            OutlinedButton(onClick = onManageFriends, modifier = Modifier.weight(1f)) {
-                Text("好友管理")
-            }
+            SecondaryActionChip("添加好友", Modifier.weight(1f), onAddFriend)
+            SecondaryActionChip("好友管理", Modifier.weight(1f), onManageFriends)
         }
         state.socialError?.let {
             Text(
@@ -488,6 +512,21 @@ private fun FeedHomePanel(
             }
         }
     }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SecondaryActionChip(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    FilterChip(
+        selected = false,
+        onClick = onClick,
+        label = { Text(text, modifier = Modifier.padding(vertical = 2.dp)) },
+        modifier = modifier,
+        colors = FilterChipDefaults.filterChipColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+            labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        ),
+    )
 }
 
 @Composable
@@ -802,7 +841,7 @@ private fun OptionRow(title: String, values: List<Pair<String, String>>, selecte
 }
 
 @Composable
-private fun IdeaDetailDialog(
+private fun IdeaDetailPage(
     idea: FeedIdea,
     comments: List<IdeaComment>,
     onDismiss: () -> Unit,
@@ -810,57 +849,97 @@ private fun IdeaDetailDialog(
     onSend: (String) -> Unit,
 ) {
     var content by remember(idea.task.id) { mutableStateOf("") }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        confirmButton = {
-            Button(onClick = { onSend(content); content = "" }) {
-                Text("发送")
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+    ) {
+        Row(verticalAlignment = Alignment.Top) {
+            Text(
+                idea.task.title,
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.weight(1f),
+            )
+            IconButton(onClick = onDismiss) {
+                Icon(Icons.Default.Close, contentDescription = "关闭详情")
             }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("关闭") }
-        },
-        title = { Text(idea.task.title) },
-        text = {
-            Column {
-                Text("${idea.author.username} 的 idea", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
-                if (idea.task.content.isNotBlank()) {
-                    Spacer(Modifier.height(6.dp))
-                    Text(idea.task.content, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                Spacer(Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        }
+        Spacer(Modifier.height(6.dp))
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            LabelChip(idea.author.username)
+            Text(idea.task.updatedAt, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Spacer(Modifier.height(10.dp))
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+        ) {
+            Column(Modifier.padding(14.dp)) {
+                Text(
+                    idea.task.content.ifBlank { "没有详细内容" },
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    minLines = 6,
+                )
+                Spacer(Modifier.height(10.dp))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     LabelChip(idea.task.category)
                     LabelChip(idea.task.status)
                     LabelChip(idea.task.priority)
-                }
-                Spacer(Modifier.height(8.dp))
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Spacer(Modifier.weight(1f))
                     OutlinedButton(onClick = onLike) {
                         Text(if (idea.likedByMe) "已赞 ${idea.likeCount}" else "点赞 ${idea.likeCount}")
                     }
-                    Text("评论 ${idea.commentCount}", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                Spacer(Modifier.height(12.dp))
-                Text("全部评论", style = MaterialTheme.typography.labelMedium)
-                if (comments.isEmpty()) {
-                    Text("还没有评论", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                } else {
-                    comments.forEach { comment ->
-                        Text("${comment.author.username}：${comment.content}", modifier = Modifier.padding(vertical = 4.dp))
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = content,
-                    onValueChange = { content = it.take(1000) },
-                    label = { Text("提供一点思路") },
-                    modifier = Modifier.fillMaxWidth(),
-                    minLines = 2,
-                )
             }
-        },
-    )
+        }
+        Spacer(Modifier.height(10.dp))
+        Text("评论 ${idea.commentCount}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        LazyColumn(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            contentPadding = PaddingValues(vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (comments.isEmpty()) {
+                item {
+                    Text("还没有评论", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            } else {
+                items(comments, key = { it.id }) { comment ->
+                    CommentRow(comment)
+                }
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(
+                value = content,
+                onValueChange = { content = it.take(1000) },
+                label = { Text("发表你的想法") },
+                modifier = Modifier.weight(1f),
+                minLines = 1,
+                maxLines = 3,
+            )
+            Button(
+                onClick = {
+                    onSend(content)
+                    content = ""
+                },
+                enabled = content.isNotBlank(),
+            ) {
+                Text("发送")
+            }
+        }
+    }
+}
+
+@Composable
+private fun CommentRow(comment: IdeaComment) {
+    Column(Modifier.fillMaxWidth()) {
+        Text(comment.author.username, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+        Text(comment.content, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
 }
 
 @Composable

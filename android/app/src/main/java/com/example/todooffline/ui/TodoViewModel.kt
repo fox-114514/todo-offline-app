@@ -313,10 +313,11 @@ class TodoViewModel(
     }
 
     fun selectFeedCircle(circleId: String?) {
+        if (_state.value.selectedFeedCircleId == circleId) return
         _state.update {
             it.copy(
                 selectedFeedCircleId = circleId,
-                feed = feedCache[circleId] ?: emptyList(),
+                feed = cachedFeedFor(circleId),
             )
         }
         loadFeed(circleId)
@@ -411,6 +412,14 @@ class TodoViewModel(
                 if (it.task.id == idea.task.id) idea else it
             } ?: emptyList()
         }
+    }
+
+    private fun cachedFeedFor(circleId: String?): List<FeedIdea> {
+        feedCache[circleId]?.let { return it }
+        if (circleId != null) {
+            return feedCache[null]?.filter { it.author.circleId == circleId } ?: emptyList()
+        }
+        return emptyList()
     }
 
     private fun syncAfterLocalChange() {
